@@ -1,0 +1,7 @@
+pynput
+pyautogui
+pywinauto
+PyQt6
+keyboard
+comtypes
+psutil
