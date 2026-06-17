@@ -11,6 +11,7 @@ _BLOCKED: set[str] = set()
 
 def register(hotkey: str, callback: Callable[[], None]) -> bool:
     normalized = _normalize(hotkey)
+    logger.debug("register hotkey %r -> %r", hotkey, normalized)
 
     if normalized in _BLOCKED:
         logger.warning("Hotkey '%s' is blocked/conflicted", hotkey)

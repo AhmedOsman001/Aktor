@@ -11,6 +11,9 @@ class ActionStep:
     window_title: Optional[str] = None
     element_name: Optional[str] = None
     element_type: Optional[str] = None
+    automation_id: Optional[str] = None
+    class_name: Optional[str] = None
+    parent_path: Optional[str] = None
     x: Optional[int] = None
     y: Optional[int] = None
     x_relative: Optional[float] = None
@@ -22,6 +25,12 @@ class ActionStep:
     delay_after: float = 0.0
     description: Optional[str] = None
     enabled: bool = True
+
+    # Smart Wait — poll for the target element before running the step instead
+    # of using the fixed delay. When enabled, delay_after is ignored at playback.
+    smart_wait_enabled: bool = False
+    smart_wait_timeout: float = 10.0
+    smart_wait_on_timeout: str = "stop"  # "stop" or "skip"
 
 
 @dataclass

@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS steps (
     delay_after REAL DEFAULT 0.0,
     description TEXT,
     enabled INTEGER DEFAULT 1,
+    smart_wait_enabled INTEGER DEFAULT 0,
+    smart_wait_timeout REAL DEFAULT 10.0,
+    smart_wait_on_timeout TEXT DEFAULT 'stop',
+    automation_id TEXT,
+    class_name TEXT,
+    parent_path TEXT,
     FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 )
 """
@@ -62,6 +68,9 @@ def init_db(db_path: Optional[Path] = None) -> None:
         conn.execute(_CREATE_STEPS_TABLE)
         conn.commit()
         _migrate(conn)
+        _migrate_smart_wait(conn)
+        _migrate_element_attrs(conn)
+        logger.debug("init_db: tables ready at %s", db_path or DB_PATH)
     finally:
         conn.close()
 
@@ -71,6 +80,41 @@ def _migrate(conn: sqlite3.Connection) -> None:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(steps)").fetchall()]
         if "enabled" not in cols:
             conn.execute("ALTER TABLE steps ADD COLUMN enabled INTEGER DEFAULT 1")
+            conn.commit()
+    except Exception:
+        pass
+
+
+def _migrate_smart_wait(conn: sqlite3.Connection) -> None:
+    """Add Smart Wait columns to existing databases without data loss."""
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(steps)").fetchall()]
+        if "smart_wait_enabled" not in cols:
+            conn.execute("ALTER TABLE steps ADD COLUMN smart_wait_enabled INTEGER DEFAULT 0")
+        if "smart_wait_timeout" not in cols:
+            conn.execute("ALTER TABLE steps ADD COLUMN smart_wait_timeout REAL DEFAULT 10.0")
+        if "smart_wait_on_timeout" not in cols:
+            conn.execute("ALTER TABLE steps ADD COLUMN smart_wait_on_timeout TEXT DEFAULT 'stop'")
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _migrate_element_attrs(conn: sqlite3.Connection) -> None:
+    """Add UI element attribute columns (automation_id / class_name / parent_path)."""
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(steps)").fetchall()]
+        added = False
+        if "automation_id" not in cols:
+            conn.execute("ALTER TABLE steps ADD COLUMN automation_id TEXT")
+            added = True
+        if "class_name" not in cols:
+            conn.execute("ALTER TABLE steps ADD COLUMN class_name TEXT")
+            added = True
+        if "parent_path" not in cols:
+            conn.execute("ALTER TABLE steps ADD COLUMN parent_path TEXT")
+            added = True
+        if added:
             conn.commit()
     except Exception:
         pass
@@ -93,40 +137,68 @@ def save_workflow(workflow: Workflow, db_path: Optional[Path] = None) -> int:
         workflow_id = cursor.lastrowid
 
         for order, step in enumerate(workflow.steps):
-            conn.execute(
-                "INSERT INTO steps (workflow_id, step_order, type, app_name, window_title, "
-                "element_name, element_type, x, y, x_relative, y_relative, keys, text, "
-                "scroll_dx, scroll_dy, delay_after, description, enabled) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    workflow_id,
-                    order,
-                    step.type,
-                    step.app_name,
-                    step.window_title,
-                    step.element_name,
-                    step.element_type,
-                    step.x,
-                    step.y,
-                    step.x_relative,
-                    step.y_relative,
-                    step.keys,
-                    step.text,
-                    step.scroll_dx,
-                    step.scroll_dy,
-                    step.delay_after,
-                    step.description,
-                    1 if step.enabled else 0,
-                ),
-            )
+            _insert_step(conn, workflow_id, order, step)
 
         conn.commit()
+        logger.debug("save_workflow: id=%d name=%r hotkey=%r steps=%d", workflow_id, workflow.name, workflow.trigger.hotkey, len(workflow.steps))
         return workflow_id
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def save_steps(workflow_id: int, steps: list[ActionStep], db_path: Optional[Path] = None) -> None:
+    conn = _get_conn(db_path)
+    try:
+        conn.execute("DELETE FROM steps WHERE workflow_id = ?", (workflow_id,))
+        for order, step in enumerate(steps):
+            _insert_step(conn, workflow_id, order, step)
+        conn.commit()
+        logger.debug("save_steps: workflow_id=%d replaced with %d steps", workflow_id, len(steps))
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _insert_step(conn: sqlite3.Connection, workflow_id: int, order: int, step: ActionStep) -> None:
+    conn.execute(
+        "INSERT INTO steps (workflow_id, step_order, type, app_name, window_title, "
+        "element_name, element_type, automation_id, class_name, parent_path, "
+        "x, y, x_relative, y_relative, keys, text, "
+        "scroll_dx, scroll_dy, delay_after, description, enabled, "
+        "smart_wait_enabled, smart_wait_timeout, smart_wait_on_timeout) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            workflow_id,
+            order,
+            step.type,
+            step.app_name,
+            step.window_title,
+            step.element_name,
+            step.element_type,
+            step.automation_id,
+            step.class_name,
+            step.parent_path,
+            step.x,
+            step.y,
+            step.x_relative,
+            step.y_relative,
+            step.keys,
+            step.text,
+            step.scroll_dx,
+            step.scroll_dy,
+            step.delay_after,
+            step.description,
+            1 if step.enabled else 0,
+            1 if step.smart_wait_enabled else 0,
+            step.smart_wait_timeout,
+            step.smart_wait_on_timeout,
+        ),
+    )
 
 
 def get_workflow(workflow_id: int, db_path: Optional[Path] = None) -> Optional[Workflow]:
@@ -136,6 +208,7 @@ def get_workflow(workflow_id: int, db_path: Optional[Path] = None) -> Optional[W
             "SELECT * FROM workflows WHERE id = ?", (workflow_id,)
         ).fetchone()
         if row is None:
+            logger.debug("get_workflow: id=%d not found", workflow_id)
             return None
 
         workflow = _row_to_workflow(row)
@@ -145,6 +218,7 @@ def get_workflow(workflow_id: int, db_path: Optional[Path] = None) -> Optional[W
             (workflow_id,),
         ).fetchall()
         workflow.steps = [_row_to_step(r) for r in step_rows]
+        logger.debug("get_workflow: id=%d name=%r steps=%d", workflow_id, workflow.name, len(workflow.steps))
         return workflow
     finally:
         conn.close()
@@ -166,6 +240,7 @@ def get_all_workflows(db_path: Optional[Path] = None) -> list[Workflow]:
             wf.steps = []
             workflows.append(wf)
 
+        logger.debug("get_all_workflows: %d workflows, steps=%s", len(workflows), [len(w.steps) for w in workflows])
         return workflows
     finally:
         conn.close()
@@ -177,6 +252,7 @@ def delete_workflow(workflow_id: int, db_path: Optional[Path] = None) -> None:
         conn.execute("DELETE FROM steps WHERE workflow_id = ?", (workflow_id,))
         conn.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
         conn.commit()
+        logger.debug("delete_workflow: id=%d", workflow_id)
     except Exception:
         conn.rollback()
         raise
@@ -191,6 +267,7 @@ def update_workflow_name(workflow_id: int, name: str, db_path: Optional[Path] = 
             "UPDATE workflows SET name = ? WHERE id = ?", (name, workflow_id)
         )
         conn.commit()
+        logger.debug("update_workflow_name: id=%d name=%r", workflow_id, name)
     finally:
         conn.close()
 
@@ -204,6 +281,7 @@ def update_last_run(workflow_id: int, db_path: Optional[Path] = None) -> None:
             (now, workflow_id),
         )
         conn.commit()
+        logger.debug("update_last_run: id=%d at=%s", workflow_id, now)
     finally:
         conn.close()
 
@@ -222,6 +300,7 @@ def update_trigger(workflow_id: int, hotkey: Optional[str] = None, voice_phrase:
                 (voice_phrase, workflow_id),
             )
         conn.commit()
+        logger.debug("update_trigger: id=%d hotkey=%r voice=%r", workflow_id, hotkey, voice_phrase)
     finally:
         conn.close()
 
@@ -240,7 +319,14 @@ def _row_to_workflow(row: sqlite3.Row) -> Workflow:
 
 
 def _row_to_step(row: sqlite3.Row) -> ActionStep:
-    enabled_val = row["enabled"] if "enabled" in row.keys() else 1
+    keys = row.keys()
+    enabled_val = row["enabled"] if "enabled" in keys else 1
+    sw_enabled = row["smart_wait_enabled"] if "smart_wait_enabled" in keys else 0
+    sw_timeout = row["smart_wait_timeout"] if "smart_wait_timeout" in keys else None
+    sw_on_timeout = row["smart_wait_on_timeout"] if "smart_wait_on_timeout" in keys else None
+    automation_id = row["automation_id"] if "automation_id" in keys else None
+    class_name = row["class_name"] if "class_name" in keys else None
+    parent_path = row["parent_path"] if "parent_path" in keys else None
     return ActionStep(
         id=row["id"],
         type=row["type"],
@@ -248,6 +334,9 @@ def _row_to_step(row: sqlite3.Row) -> ActionStep:
         window_title=row["window_title"],
         element_name=row["element_name"],
         element_type=row["element_type"],
+        automation_id=automation_id,
+        class_name=class_name,
+        parent_path=parent_path,
         x=row["x"],
         y=row["y"],
         x_relative=row["x_relative"],
@@ -259,6 +348,9 @@ def _row_to_step(row: sqlite3.Row) -> ActionStep:
         delay_after=row["delay_after"] or 0.0,
         description=row["description"],
         enabled=bool(enabled_val),
+        smart_wait_enabled=bool(sw_enabled),
+        smart_wait_timeout=sw_timeout if sw_timeout is not None else 10.0,
+        smart_wait_on_timeout=sw_on_timeout or "stop",
     )
 
 

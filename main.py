@@ -24,22 +24,27 @@ warnings.filterwarnings("ignore", message=".*Revert to STA COM threading mode.*"
 
 os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
 
+from flowrecord.logger_setup import setup_logging
+
+_log_file = setup_logging()
+
 from PyQt6.QtWidgets import (
     QApplication,
     QInputDialog,
     QSystemTrayIcon,
     QMenu,
 )
-from PyQt6.QtGui import QAction, QIcon, QPixmap, QPainter, QColor
+from PyQt6.QtGui import QAction, QIcon, QFont
 from PyQt6.QtCore import Qt, QTimer
 
 from flowrecord.config import APP_NAME, DEFAULT_RECORD_HOTKEY
 from flowrecord.listeners.hotkey_listener import register, unregister, unregister_all
 from flowrecord.models import Trigger, Workflow
+from flowrecord.ui import icons, theme, theme_prefs
 from flowrecord.ui.overlay import OverlayController, OverlayState
 from flowrecord.core.player import Player
 from flowrecord.core.recorder import Recorder
-from flowrecord.ui.workflow_manager import WorkflowManager
+from flowrecord.ui.workflow_manager import WorkflowManagerWindow
 from flowrecord.storage.workflow_store import (
     get_all_workflows,
     get_workflow,
@@ -48,30 +53,12 @@ from flowrecord.storage.workflow_store import (
     update_last_run,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger(__name__)
+logger.debug("Log file: %s", _log_file)
 
 
 def _make_icon() -> QIcon:
-    pixmap = QPixmap(32, 32)
-    pixmap.fill(QColor(0, 0, 0, 0))
-    p = QPainter(pixmap)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QColor(80, 140, 220))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.drawRoundedRect(2, 2, 28, 28, 8, 8)
-    p.setBrush(QColor(255, 255, 255))
-    font = p.font()
-    font.setPixelSize(20)
-    font.setBold(True)
-    p.setFont(font)
-    p.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "F")
-    p.end()
-    return QIcon(pixmap)
+    return icons.app_icon(32)
 
 
 class FlowRecordApp:
@@ -79,15 +66,37 @@ class FlowRecordApp:
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setQuitOnLastWindowClosed(False)
 
+        self._app.setFont(QFont("Segoe UI", 10))
+
+        # Load + apply the saved theme (mode + accent) before building any UI.
+        prefs = theme_prefs.load()
+        theme.manager.set_theme(prefs["mode"], prefs["accent"])
+        theme.manager.apply(self._app)
+
         self._icon = _make_icon()
         self._app.setWindowIcon(self._icon)
+
+        # Bridge Python logging into the UI's Activity panel.
+        from flowrecord.ui import log_panel
+        log_panel.install()
 
         init_db()
 
         self._recorder = Recorder(on_step_added=self._on_step_added)
         self._player = Player(on_step_complete=self._on_playback_step)
         self._overlay = OverlayController()
-        self._wf_dialog: WorkflowManager | None = None
+        self._wf_dialog: WorkflowManagerWindow | None = None
+
+        # Smart Wait status -> overlay (called from the playback thread).
+        self._player.on_smart_wait_progress = (
+            lambda name, e, t: self._overlay.show_smart_wait(name, e, t)
+        )
+        self._player.on_smart_wait_found = (
+            lambda name, e: self._overlay.show_smart_wait_found(name, e)
+        )
+        self._player.on_smart_wait_timeout = (
+            lambda name, t: self._overlay.show_smart_wait_timeout(name, t)
+        )
 
         self._overlay.record_requested.connect(self._start_recording)
         self._overlay.stop_requested.connect(self._stop)
@@ -97,6 +106,7 @@ class FlowRecordApp:
         self._setup_tray()
         self._register_global_hotkeys()
         self._overlay.show()
+        self._show_workflows()
 
         self._last_toggle_time = 0.0
 
@@ -106,12 +116,6 @@ class FlowRecordApp:
         self._tray = QSystemTrayIcon(self._icon, self._app)
 
         menu = QMenu()
-        menu.setStyleSheet("""
-            QMenu { background-color: #2a2a36; color: #ccc; border: 1px solid #444; padding: 4px; }
-            QMenu::item { padding: 8px 24px; border-radius: 4px; }
-            QMenu::item:selected { background-color: #3a5fcd; }
-            QMenu::separator { height: 1px; background: #444; margin: 4px 8px; }
-        """)
 
         act_show = menu.addAction("Show Overlay")
         act_show.triggered.connect(self._show_overlay)
@@ -121,6 +125,9 @@ class FlowRecordApp:
 
         act_workflows = menu.addAction("Workflows...")
         act_workflows.triggered.connect(self._show_workflows)
+
+        act_theme = menu.addAction("Toggle Light / Dark")
+        act_theme.triggered.connect(self._toggle_theme)
 
         menu.addSeparator()
 
@@ -138,6 +145,19 @@ class FlowRecordApp:
 
     def _show_overlay(self):
         self._overlay.show()
+
+    def _toggle_theme(self):
+        new_mode = "light" if theme.manager.is_dark() else "dark"
+        theme.manager.set_mode(new_mode, emit=False)
+        theme.manager.apply(self._app)
+        self._refresh_app_icon()
+        theme_prefs.save(theme.manager.mode, theme.manager.accent)
+        logger.info("Theme switched to %s mode", new_mode)
+
+    def _refresh_app_icon(self):
+        self._icon = _make_icon()
+        self._app.setWindowIcon(self._icon)
+        self._tray.setIcon(self._icon)
 
     def _register_global_hotkeys(self):
         register(DEFAULT_RECORD_HOTKEY, self._toggle_recording)
@@ -238,11 +258,18 @@ class FlowRecordApp:
     def _show_workflows(self):
         if self._wf_dialog is not None:
             self._wf_dialog.raise_()
+            self._wf_dialog.activateWindow()
             return
-        self._wf_dialog = WorkflowManager()
+        self._wf_dialog = WorkflowManagerWindow()
         self._wf_dialog.play_requested.connect(self._play_by_id)
+        self._wf_dialog.new_requested.connect(self._on_new_from_manager)
+        self._wf_dialog.test_steps_requested.connect(self._play_workflow)
         self._wf_dialog.finished.connect(self._on_wf_dialog_closed)
         self._wf_dialog.show()
+
+    def _on_new_from_manager(self):
+        self._close_wf_dialog()
+        self._start_recording()
 
     def _on_wf_dialog_closed(self):
         self._wf_dialog = None

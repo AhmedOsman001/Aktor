@@ -1,16 +1,42 @@
+import ctypes
 import logging
 import threading
 import time
+from ctypes import wintypes
 from typing import Callable, Optional
 
 import psutil
 from pynput import keyboard, mouse
 
-from flowrecord.config import APP_NAME, APP_POLL_INTERVAL_MS, DELAY_THRESHOLD, MAX_DELAY_SECONDS
-from flowrecord.core.element_detector import get_element_at
+from flowrecord.config import APP_NAME, APP_POLL_INTERVAL_MS, DELAY_THRESHOLD, MAX_DELAY_SECONDS, SYSTEM_PROCESSES
+from flowrecord.core.element_detector import get_element_at, prime_window, reset_a11y_cache
 from flowrecord.models import ActionStep
 
 logger = logging.getLogger(__name__)
+
+_user32 = ctypes.windll.user32
+_user32.GetForegroundWindow.restype = wintypes.HWND
+_user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+_user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+_user32.GetWindowTextLengthW.restype = ctypes.c_int
+_user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_user32.GetWindowTextW.restype = ctypes.c_int
+
+
+def _foreground_app_info() -> Optional[tuple[int, str]]:
+    """Return (pid, window_title) of the current foreground window, or None."""
+    hwnd = _user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    pid = wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return None
+    length = _user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(length + 1)
+    _user32.GetWindowTextW(hwnd, buf, length + 1)
+    return pid.value, (buf.value or "")
 
 _MODIFIER_KEYS = {
     keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
@@ -40,7 +66,7 @@ class Recorder:
         self._text_buffer: str = ""
         self._text_buffer_start: float = 0.0
         self._on_step_added = on_step_added
-        self._known_pids: set[int] = set()
+        self._last_fg_exe: Optional[str] = None
         self._lock = threading.Lock()
 
     @property
@@ -66,8 +92,15 @@ class Recorder:
         self._start_time = time.monotonic()
         self._last_action_time = self._start_time
         self._stop_event.clear()
+        reset_a11y_cache()
 
-        self._snapshot_running_pids()
+        self._last_fg_exe = self._current_foreground_exe()
+        # Wake the focused app's accessibility tree up front (Chromium/CEF apps
+        # build it lazily) so the first clicks resolve to named elements.
+        try:
+            prime_window(_user32.GetForegroundWindow())
+        except Exception:
+            pass
 
         self._mouse_listener = mouse.Listener(
             on_click=self._on_click,
@@ -81,11 +114,12 @@ class Recorder:
         self._keyboard_listener.start()
 
         self._app_poll_thread = threading.Thread(
-            target=self._poll_new_apps, daemon=True
+            target=self._poll_foreground_apps, daemon=True
         )
         self._app_poll_thread.start()
 
         logger.info("Recording started")
+        logger.debug("Foreground at start: %s", self._last_fg_exe)
 
     def stop(self) -> list[ActionStep]:
         if not self._recording:
@@ -123,13 +157,66 @@ class Recorder:
             self._last_action_time = time.monotonic()
             logger.info("Recording resumed")
 
-    def _snapshot_running_pids(self) -> None:
-        self._known_pids.clear()
+    def _current_foreground_exe(self) -> Optional[str]:
+        info = _foreground_app_info()
+        if not info:
+            return None
+        pid, _title = info
         try:
-            for proc in psutil.process_iter(["pid"]):
-                self._known_pids.add(proc.pid)
-        except Exception:
-            pass
+            return psutil.Process(pid).name().lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None
+
+    def _poll_foreground_apps(self) -> None:
+        interval = APP_POLL_INTERVAL_MS / 1000.0
+        while not self._stop_event.is_set():
+            self._stop_event.wait(interval)
+            if self._stop_event.is_set() or self._paused:
+                continue
+
+            info = _foreground_app_info()
+            if not info:
+                continue
+            pid, title = info
+
+            try:
+                exe = psutil.Process(pid).name()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+            exe_l = exe.lower()
+            if exe_l == self._last_fg_exe:
+                continue
+            self._last_fg_exe = exe_l
+            logger.debug("Foreground changed -> pid=%d exe=%s title=%r", pid, exe, title)
+
+            if exe_l in SYSTEM_PROCESSES:
+                logger.debug("Skipping system process: %s", exe)
+                continue
+            if exe_l in ("python.exe", "pythonw.exe", "py.exe"):
+                if APP_NAME.lower() in title.lower() or "flowrecord" in title.lower():
+                    logger.debug("Ignoring FlowRecord foreground: %s", exe)
+                    continue
+
+            # Proactively wake the newly focused app's accessibility tree so a
+            # Chromium/CEF host has it built before the user clicks.
+            try:
+                prime_window(_user32.GetForegroundWindow())
+            except Exception:
+                pass
+
+            self._flush_text_buffer()
+            self._add_delay()
+
+            step = ActionStep(
+                type="launch_app",
+                app_name=exe,
+                window_title=title or None,
+                description=f"Activated {exe}",
+            )
+            with self._lock:
+                self._steps.append(step)
+            self._notify_step_added()
 
     def _add_delay(self) -> None:
         now = time.monotonic()
@@ -137,6 +224,7 @@ class Recorder:
         if delta > DELAY_THRESHOLD and self._steps:
             capped = min(delta, MAX_DELAY_SECONDS)
             self._steps[-1].delay_after = round(capped, 3)
+            logger.debug("delay_after=%.3fs appended to step %d", capped, len(self._steps) - 1)
         self._last_action_time = now
 
     def _flush_text_buffer(self) -> None:
@@ -146,6 +234,7 @@ class Recorder:
             text = self._text_buffer
             self._text_buffer = ""
 
+        logger.debug("Typed text flushed: %r (%d chars)", text, len(text))
         step = ActionStep(
             type="type_text",
             text=text,
@@ -172,12 +261,18 @@ class Recorder:
         if app and app.lower() in ("python.exe", "pythonw.exe", "py.exe"):
             win = elem.get("window_title", "") or ""
             if APP_NAME.lower() in win.lower() or "flowrecord" in win.lower():
+                logger.debug("Ignoring click on FlowRecord UI at (%d,%d)", x, y)
                 return
 
         self._flush_text_buffer()
         self._add_delay()
 
-        elem = get_element_at(x, y)
+        logger.debug(
+            "CLICK (%d,%d) element=%r type=%r app=%r window=%r rel=(%s,%s)",
+            x, y, elem.get("element_name"), elem.get("element_type"),
+            elem.get("app_name"), elem.get("window_title"),
+            elem.get("x_relative"), elem.get("y_relative"),
+        )
 
         step = ActionStep(
             type="click",
@@ -187,6 +282,9 @@ class Recorder:
             window_title=elem.get("window_title"),
             element_name=elem.get("element_name"),
             element_type=elem.get("element_type"),
+            automation_id=elem.get("automation_id"),
+            class_name=elem.get("class_name"),
+            parent_path=elem.get("parent_path"),
             x_relative=elem.get("x_relative"),
             y_relative=elem.get("y_relative"),
             description=f"Click at ({x}, {y})"
@@ -205,6 +303,7 @@ class Recorder:
         self._add_delay()
 
         direction = "down" if dy < 0 else "up" if dy > 0 else "left" if dx < 0 else "right"
+        logger.debug("SCROLL %s dx=%d dy=%d at (%d,%d)", direction, dx, dy, x, y)
         step = ActionStep(
             type="scroll",
             x=x,
@@ -236,6 +335,7 @@ class Recorder:
             mod_names = self._modifiers_str(now_active_modifiers)
             combo = f"{mod_names}+{key_str}" if mod_names else key_str
 
+            logger.debug("KEY combo=%s (mods=%s)", combo, mod_names)
             step = ActionStep(
                 type="keypress",
                 keys=combo,
@@ -250,6 +350,7 @@ class Recorder:
                 if not self._text_buffer:
                     self._add_delay()
                 self._text_buffer += char
+                logger.debug("buffering char %r -> buffer=%r", char, self._text_buffer)
             else:
                 self._flush_text_buffer()
                 self._add_delay()
@@ -266,45 +367,6 @@ class Recorder:
 
     def _on_key_release(self, key) -> None:
         self._held_modifiers.discard(key)
-
-    def _poll_new_apps(self) -> None:
-        interval = APP_POLL_INTERVAL_MS / 1000.0
-        while not self._stop_event.is_set():
-            self._stop_event.wait(interval)
-            if self._stop_event.is_set():
-                break
-            if self._paused:
-                continue
-            try:
-                current_pids: set[int] = set()
-                new_processes: list[psutil.Process] = []
-                for proc in psutil.process_iter(["pid", "name"]):
-                    current_pids.add(proc.pid)
-                    if proc.pid not in self._known_pids:
-                        try:
-                            new_processes.append(psutil.Process(proc.pid))
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-
-                self._known_pids = current_pids
-
-                for proc in new_processes:
-                    try:
-                        name = proc.name()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
-
-                    self._add_delay()
-                    step = ActionStep(
-                        type="launch_app",
-                        app_name=name,
-                        description=f"App launched: {name}",
-                    )
-                    with self._lock:
-                        self._steps.append(step)
-                    self._notify_step_added()
-            except Exception:
-                logger.warning("Error polling for new apps", exc_info=True)
 
     @staticmethod
     def _key_to_str(key) -> str:
