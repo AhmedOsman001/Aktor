@@ -1,5 +1,7 @@
 import ctypes
 import logging
+import os
+import queue
 import threading
 import time
 from ctypes import wintypes
@@ -14,6 +16,8 @@ from flowrecord.models import ActionStep
 
 logger = logging.getLogger(__name__)
 
+_OUR_PID = os.getpid()
+
 _user32 = ctypes.windll.user32
 _user32.GetForegroundWindow.restype = wintypes.HWND
 _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
@@ -22,6 +26,22 @@ _user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
 _user32.GetWindowTextLengthW.restype = ctypes.c_int
 _user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 _user32.GetWindowTextW.restype = ctypes.c_int
+_user32.WindowFromPoint.argtypes = [wintypes.POINT]
+_user32.WindowFromPoint.restype = wintypes.HWND
+
+
+def _window_pid_at(x: int, y: int) -> Optional[int]:
+    """PID owning the window under (x, y). Fast (no UIA) — used to filter clicks
+    on FlowRecord's own windows without an expensive element lookup."""
+    try:
+        hwnd = _user32.WindowFromPoint(wintypes.POINT(x, y))
+        if not hwnd:
+            return None
+        pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value or None
+    except Exception:
+        return None
 
 
 def _foreground_app_info() -> Optional[tuple[int, str]]:
@@ -38,6 +58,17 @@ def _foreground_app_info() -> Optional[tuple[int, str]]:
     _user32.GetWindowTextW(hwnd, buf, length + 1)
     return pid.value, (buf.value or "")
 
+
+def _cursor_pos() -> Optional[tuple[int, int]]:
+    """Physical screen position of the cursor, or None on failure."""
+    try:
+        pt = wintypes.POINT()
+        if _user32.GetCursorPos(ctypes.byref(pt)):
+            return pt.x, pt.y
+    except Exception:
+        pass
+    return None
+
 _MODIFIER_KEYS = {
     keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
     keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r,
@@ -49,6 +80,11 @@ _NORMAL_CHAR_KEYS = set(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     " `-=[]\\;',./"
 )
+
+# Double-click thresholds from the OS (time window + max travel between clicks).
+_DBL_CLICK_S = (_user32.GetDoubleClickTime() or 500) / 1000.0
+_DBL_DX = _user32.GetSystemMetrics(36) or 4  # SM_CXDOUBLECLK
+_DBL_DY = _user32.GetSystemMetrics(37) or 4  # SM_CYDOUBLECLK
 
 
 class Recorder:
@@ -68,6 +104,12 @@ class Recorder:
         self._on_step_added = on_step_added
         self._last_fg_exe: Optional[str] = None
         self._lock = threading.Lock()
+        # Double-click detection state.
+        self._last_click: Optional[tuple] = None  # (time, x, y, button)
+        self._last_click_step: Optional[ActionStep] = None
+        # Off-thread element resolution so the input hook stays responsive.
+        self._resolve_queue: "queue.Queue" = queue.Queue()
+        self._resolver_thread: Optional[threading.Thread] = None
 
     @property
     def recording(self) -> bool:
@@ -89,10 +131,16 @@ class Recorder:
         self._paused = False
         self._held_modifiers.clear()
         self._text_buffer = ""
+        self._last_click = None
+        self._last_click_step = None
         self._start_time = time.monotonic()
         self._last_action_time = self._start_time
         self._stop_event.clear()
         reset_a11y_cache()
+
+        self._resolve_queue = queue.Queue()
+        self._resolver_thread = threading.Thread(target=self._resolve_worker, daemon=True)
+        self._resolver_thread.start()
 
         self._last_fg_exe = self._current_foreground_exe()
         # Wake the focused app's accessibility tree up front (Chromium/CEF apps
@@ -137,9 +185,15 @@ class Recorder:
         if self._app_poll_thread:
             self._app_poll_thread.join(timeout=2.0)
 
+        # Let the resolver finish element lookups for the final clicks.
+        if self._resolver_thread:
+            self._resolve_queue.put(None)
+            self._resolver_thread.join(timeout=8.0)
+
         self._mouse_listener = None
         self._keyboard_listener = None
         self._app_poll_thread = None
+        self._resolver_thread = None
 
         steps = list(self._steps)
         logger.info("Recording stopped — %d steps captured", len(steps))
@@ -252,47 +306,108 @@ class Recorder:
                 pass
 
     def _on_click(self, x: int, y: int, button: mouse.Button, pressed: bool) -> None:
+        # This runs on the OS input hook thread, which must return fast — the
+        # expensive element lookup is deferred to the resolver thread so we don't
+        # block (and drop) subsequent scroll/click events.
         if not self._recording or self._paused or not pressed:
             return
 
-        elem = get_element_at(x, y)
+        # Fast self-filter: ignore clicks on FlowRecord's own windows (no UIA).
+        if _window_pid_at(x, y) == _OUR_PID:
+            logger.debug("Ignoring click on FlowRecord UI at (%d,%d)", x, y)
+            return
 
-        app = elem.get("app_name", "")
-        if app and app.lower() in ("python.exe", "pythonw.exe", "py.exe"):
-            win = elem.get("window_title", "") or ""
-            if APP_NAME.lower() in win.lower() or "flowrecord" in win.lower():
-                logger.debug("Ignoring click on FlowRecord UI at (%d,%d)", x, y)
-                return
+        now = time.monotonic()
+        # Double-click: a second press of the same button, near the same spot,
+        # within the OS double-click window -> promote the prior click step.
+        if self._is_double_click(now, x, y, button):
+            self._promote_to_double_click(x, y)
+            self._last_click = None  # don't chain a 3rd press into the pair
+            return
+
+        if button == mouse.Button.right:
+            click_type, verb = "right_click", "Right-click"
+        elif button == mouse.Button.middle:
+            click_type, verb = "middle_click", "Middle-click"
+        else:
+            click_type, verb = "click", "Click"
 
         self._flush_text_buffer()
         self._add_delay()
 
-        logger.debug(
-            "CLICK (%d,%d) element=%r type=%r app=%r window=%r rel=(%s,%s)",
-            x, y, elem.get("element_name"), elem.get("element_type"),
-            elem.get("app_name"), elem.get("window_title"),
-            elem.get("x_relative"), elem.get("y_relative"),
-        )
-
         step = ActionStep(
-            type="click",
+            type=click_type,
             x=x,
             y=y,
-            app_name=elem.get("app_name"),
-            window_title=elem.get("window_title"),
-            element_name=elem.get("element_name"),
-            element_type=elem.get("element_type"),
-            automation_id=elem.get("automation_id"),
-            class_name=elem.get("class_name"),
-            parent_path=elem.get("parent_path"),
-            x_relative=elem.get("x_relative"),
-            y_relative=elem.get("y_relative"),
-            description=f"Click at ({x}, {y})"
-            + (f" on '{elem.get('element_name')}'" if elem.get("element_name") else ""),
+            description=f"{verb} at ({x}, {y})",
         )
-
         with self._lock:
             self._steps.append(step)
+        self._last_click = (now, x, y, button)
+        self._last_click_step = step
+        self._notify_step_added()
+
+        # Resolve the UI element off the hook thread and fill the step in.
+        self._resolve_queue.put((step, x, y, verb))
+
+    def _resolve_worker(self) -> None:
+        """Drain queued clicks and fill in their UI element details (the slow,
+        UIA-heavy part) without blocking the input hook."""
+        while True:
+            try:
+                item = self._resolve_queue.get(timeout=0.2)
+            except queue.Empty:
+                if self._stop_event.is_set():
+                    return
+                continue
+            if item is None:
+                return
+            step, x, y, verb = item
+            try:
+                elem = get_element_at(x, y)
+                step.app_name = elem.get("app_name")
+                step.window_title = elem.get("window_title")
+                step.element_name = elem.get("element_name")
+                step.element_type = elem.get("element_type")
+                step.automation_id = elem.get("automation_id")
+                step.class_name = elem.get("class_name")
+                step.parent_path = elem.get("parent_path")
+                step.x_relative = elem.get("x_relative")
+                step.y_relative = elem.get("y_relative")
+                if elem.get("element_name"):
+                    step.description = f"{verb} at ({x}, {y}) on '{elem.get('element_name')}'"
+                logger.debug(
+                    "CLICK (%d,%d) element=%r type=%r app=%r window=%r rel=(%s,%s)",
+                    x, y, elem.get("element_name"), elem.get("element_type"),
+                    elem.get("app_name"), elem.get("window_title"),
+                    elem.get("x_relative"), elem.get("y_relative"),
+                )
+            except Exception:
+                logger.exception("Element resolution failed for click at (%d,%d)", x, y)
+
+    def _is_double_click(self, now: float, x: int, y: int, button) -> bool:
+        # Only the left button forms a double_click; right/middle stay separate.
+        if button != mouse.Button.left:
+            return False
+        if not self._last_click or self._last_click_step is None:
+            return False
+        lt, lx, ly, lb = self._last_click
+        return (
+            lb == mouse.Button.left
+            and (now - lt) <= _DBL_CLICK_S
+            and abs(x - lx) <= _DBL_DX
+            and abs(y - ly) <= _DBL_DY
+            and self._last_click_step.type in ("click", "double_click")
+        )
+
+    def _promote_to_double_click(self, x: int, y: int) -> None:
+        step = self._last_click_step
+        if step is None:
+            return
+        step.type = "double_click"
+        target = f" on '{step.element_name}'" if step.element_name else ""
+        step.description = f"Double-click at ({step.x}, {step.y}){target}"
+        logger.debug("Promoted click to double_click at (%d,%d)%s", step.x, step.y, target)
         self._notify_step_added()
 
     def _on_scroll(self, x: int, y: int, dx: int, dy: int) -> None:
@@ -302,12 +417,17 @@ class Recorder:
         self._flush_text_buffer()
         self._add_delay()
 
+        # pynput's wheel-event coordinates can be stale; read the live cursor so
+        # playback scrolls over the right area.
+        pos = _cursor_pos()
+        sx, sy = pos if pos else (x, y)
+
         direction = "down" if dy < 0 else "up" if dy > 0 else "left" if dx < 0 else "right"
-        logger.debug("SCROLL %s dx=%d dy=%d at (%d,%d)", direction, dx, dy, x, y)
+        logger.debug("SCROLL %s dx=%d dy=%d at (%d,%d)", direction, dx, dy, sx, sy)
         step = ActionStep(
             type="scroll",
-            x=x,
-            y=y,
+            x=sx,
+            y=sy,
             scroll_dx=dx,
             scroll_dy=dy,
             description=f"Scroll {direction} ({abs(dy)} clicks)",

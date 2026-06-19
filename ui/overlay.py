@@ -194,6 +194,7 @@ class _OverlayBar(QWidget):
         self._shadow.setOffset(0, 9)
         self._frame.setGraphicsEffect(self._shadow)
         self._state = OverlayState.IDLE
+        self._paused_state = False
 
         self._inner_layout = QHBoxLayout(self._frame)
         self._inner_layout.setContentsMargins(12, 7, 12, 7)
@@ -263,8 +264,8 @@ class _OverlayBar(QWidget):
             btn.setIconSize(QSize(15, 15))
         self._btn_record.setIcon(icons.icon("record", white, 14))
         self._btn_stop.setIcon(icons.icon("stop", white, 14))
-        self._btn_pause.setIcon(icons.icon("pause", prim, 14))
         self._btn_workflows.setIcon(icons.icon("workflows", prim, 16))
+        self.set_paused(self._paused_state)
         self._sep.setStyleSheet(
             f"background-color: {toks['GLASS_HI_STRONG']}; border: none;"
         )
@@ -308,6 +309,7 @@ class _OverlayBar(QWidget):
 
     def _set_recording_layout(self):
         self._clear_layout()
+        self.set_paused(False)  # each recording starts un-paused
         self._btn_record.hide()
         self._btn_workflows.hide()
         self._btn_stop.show()
@@ -382,6 +384,16 @@ class _OverlayBar(QWidget):
             motion.set_glow(self._shadow, theme.manager.color("ACCENT").name(), blur=44, alpha=165)
         else:
             motion.set_glow(self._shadow, "#000000", blur=28, alpha=180, dy=9)
+
+    def set_paused(self, paused: bool):
+        self._paused_state = paused
+        prim = theme.manager.color("TEXT_PRIMARY").name()
+        if paused:
+            self._btn_pause.setText("Resume")
+            self._btn_pause.setIcon(icons.icon("play_fill", prim, 13))
+        else:
+            self._btn_pause.setText("Pause")
+            self._btn_pause.setIcon(icons.icon("pause", prim, 14))
 
     def set_step_count(self, n: int):
         self._step_label.setText(f"{n} steps")
@@ -515,6 +527,9 @@ class OverlayController(QObject):
 
     def set_step_count(self, n: int):
         self._dispatch(lambda: self._bar.set_step_count(n))
+
+    def set_paused(self, paused: bool):
+        self._dispatch(lambda: self._bar.set_paused(paused))
 
     def set_playback_progress(self, current: int, total: int, description: str):
         def _do():

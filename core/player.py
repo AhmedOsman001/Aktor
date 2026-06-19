@@ -21,6 +21,10 @@ pyautogui.PAUSE = 0.02
 # is the right granularity for UI element detection and keeps things simple.
 SMART_WAIT_INTERVAL_S = 1.0
 
+# One mouse-wheel notch = WHEEL_DELTA raw units. pynput records scroll in notches
+# but pyautogui.scroll() takes raw units, so we scale notches up on playback.
+WHEEL_DELTA = 120
+
 
 class PlaybackError(Exception):
     """Raised to halt playback (e.g. a Smart Wait step timed out with on_timeout='stop')."""
@@ -167,6 +171,9 @@ class Player:
 
         handler = {
             "click": self._do_click,
+            "double_click": self._do_double_click,
+            "right_click": self._do_right_click,
+            "middle_click": self._do_middle_click,
             "keypress": self._do_keypress,
             "type_text": self._do_type_text,
             "scroll": self._do_scroll,
@@ -254,6 +261,21 @@ class Player:
         click_x, click_y = self._resolve_click_coords(step)
         logger.debug("Click at (%d, %d)", click_x, click_y)
         pyautogui.click(click_x, click_y)
+
+    def _do_double_click(self, step: ActionStep) -> None:
+        click_x, click_y = self._resolve_click_coords(step)
+        logger.debug("Double-click at (%d, %d)", click_x, click_y)
+        pyautogui.doubleClick(click_x, click_y)
+
+    def _do_right_click(self, step: ActionStep) -> None:
+        click_x, click_y = self._resolve_click_coords(step)
+        logger.debug("Right-click at (%d, %d)", click_x, click_y)
+        pyautogui.rightClick(click_x, click_y)
+
+    def _do_middle_click(self, step: ActionStep) -> None:
+        click_x, click_y = self._resolve_click_coords(step)
+        logger.debug("Middle-click at (%d, %d)", click_x, click_y)
+        pyautogui.middleClick(click_x, click_y)
 
     def _resolve_click_coords(self, step: ActionStep) -> tuple[int, int]:
         if step.element_name:
@@ -372,11 +394,28 @@ class Player:
         pyautogui.write(step.text, interval=0.02)
 
     def _do_scroll(self, step: ActionStep) -> None:
-        logger.debug("scroll dx=%d dy=%d", step.scroll_dx, step.scroll_dy)
-        if step.scroll_dy != 0:
-            pyautogui.scroll(step.scroll_dy)
-        if step.scroll_dx != 0:
-            pyautogui.hscroll(step.scroll_dx)
+        # Scale notches -> raw wheel units.
+        amount_y = int(step.scroll_dy * WHEEL_DELTA)
+        amount_x = int(step.scroll_dx * WHEEL_DELTA)
+
+        # IMPORTANT: a wheel event goes to the window under the *current* cursor
+        # (Win32 mouse_event ignores x/y for MOUSEEVENTF_WHEEL), so move the
+        # cursor onto the target first — passing x/y to pyautogui.scroll alone
+        # does nothing.
+        if step.x is not None and step.y is not None:
+            try:
+                pyautogui.moveTo(step.x, step.y)
+            except Exception:
+                logger.debug("scroll moveTo(%s,%s) failed", step.x, step.y)
+
+        logger.debug(
+            "scroll notches dx=%d dy=%d -> delta (%d,%d) at (%s,%s)",
+            step.scroll_dx, step.scroll_dy, amount_x, amount_y, step.x, step.y,
+        )
+        if amount_y != 0:
+            pyautogui.scroll(amount_y)
+        if amount_x != 0:
+            pyautogui.hscroll(amount_x)
 
     def _do_launch_app(self, step: ActionStep) -> None:
         app_name = step.app_name

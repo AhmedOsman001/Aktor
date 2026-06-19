@@ -124,6 +124,9 @@ class _SearchBox(QLineEdit):
 _STEP_ICON_NAMES = {
     "launch_app": "launch_app",
     "click": "click",
+    "double_click": "click",
+    "right_click": "click",
+    "middle_click": "click",
     "keypress": "keypress",
     "type_text": "type_text",
     "scroll": "scroll",

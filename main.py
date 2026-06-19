@@ -244,16 +244,23 @@ class FlowRecordApp:
                      name.strip(), wf_id, len(steps), hotkey or "none")
 
     def _toggle_pause(self):
+        paused = None
         if self._recorder.recording:
             if self._recorder.paused:
                 self._recorder.resume()
+                paused = False
             else:
                 self._recorder.pause()
+                paused = True
         elif self._player.playing:
             if self._player.paused:
                 self._player.resume()
+                paused = False
             else:
                 self._player.pause()
+                paused = True
+        if paused is not None:
+            self._overlay.set_paused(paused)
 
     def _show_workflows(self):
         if self._wf_dialog is not None:
