@@ -19,8 +19,8 @@ legacy module-level constants below remain available for back-compat and reflect
 the default (dark) palette.
 """
 
-from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtGui import QColor
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtGui import QColor
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +601,7 @@ class _ThemeManager(QObject):
     stylesheets and repaint.
     """
 
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self):
         super().__init__()

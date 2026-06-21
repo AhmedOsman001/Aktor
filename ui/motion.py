@@ -6,11 +6,11 @@ glows. All animations are parented to the effect so they stay alive while runnin
 and are cleaned up afterwards.
 """
 
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
     QEasingCurve, QParallelAnimationGroup, QPoint, QPointF, QPropertyAnimation,
 )
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QStackedWidget
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QGraphicsDropShadowEffect, QStackedWidget
 
 
 def attach_shadow(widget, color="#000000", blur=22, dx=0, dy=6, alpha=120):

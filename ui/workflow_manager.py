@@ -4,8 +4,8 @@ import traceback
 from datetime import datetime
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QSize, QTimer, Signal
+from PySide6.QtWidgets import (
     QComboBox,
     QGridLayout,
     QInputDialog,
@@ -98,7 +98,7 @@ def _format_last_run(dt: Optional[datetime]) -> str:
 
 
 class _ClickableLabel(QLabel):
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -150,8 +150,8 @@ def _step_icon_name(step_type: str) -> str:
 
 
 class StepRowWidget(QFrame):
-    delete_clicked = pyqtSignal(object)
-    changed = pyqtSignal()
+    delete_clicked = Signal(object)
+    changed = Signal()
 
     def __init__(self, step: ActionStep, index: int, parent=None):
         super().__init__(parent)
@@ -320,7 +320,7 @@ class StepRowWidget(QFrame):
 
 
 class _ReorderableStepList(QListWidget):
-    order_changed = pyqtSignal()
+    order_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -338,10 +338,10 @@ class _ReorderableStepList(QListWidget):
 
 
 class WorkflowRowWidget(QFrame):
-    run_clicked = pyqtSignal(int)
-    edit_clicked = pyqtSignal(int)
-    delete_clicked = pyqtSignal(int)
-    rename_requested = pyqtSignal(int, str)
+    run_clicked = Signal(int)
+    edit_clicked = Signal(int)
+    delete_clicked = Signal(int)
+    rename_requested = Signal(int, str)
 
     def __init__(self, workflow: Workflow, step_count: int, parent=None):
         super().__init__(parent)
@@ -458,7 +458,7 @@ class WorkflowRowWidget(QFrame):
 
 
 class StepEditorWindow(QDialog):
-    test_requested = pyqtSignal(object)
+    test_requested = Signal(object)
 
     def __init__(self, workflow: Workflow, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
@@ -623,7 +623,7 @@ class StepEditorWindow(QDialog):
 class _EmptyState(QWidget):
     """Illustrated empty / onboarding state shown when there are no workflows."""
 
-    record_clicked = pyqtSignal()
+    record_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -716,13 +716,13 @@ class _LibraryPage(QWidget):
 
 
 class WorkflowManagerWindow(FramelessDialog):
-    play_requested = pyqtSignal(int, float, int, bool)  # id, speed, repeat, loop
-    new_requested = pyqtSignal()
-    test_steps_requested = pyqtSignal(object)
-    hotkeys_changed = pyqtSignal()  # a trigger changed → app re-registers hotkeys
-    theme_mode_requested = pyqtSignal(str)
-    accent_requested = pyqtSignal(str)
-    pref_changed = pyqtSignal(str, object)
+    play_requested = Signal(int, float, int, bool)  # id, speed, repeat, loop
+    new_requested = Signal()
+    test_steps_requested = Signal(object)
+    hotkeys_changed = Signal()  # a trigger changed → app re-registers hotkeys
+    theme_mode_requested = Signal(str)
+    accent_requested = Signal(str)
+    pref_changed = Signal(str, object)
 
     def __init__(self, prefs: dict | None = None, parent=None):
         super().__init__("FlowRecord", show_logo=True, parent=parent)

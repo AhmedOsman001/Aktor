@@ -9,9 +9,9 @@ import collections
 import html
 import logging
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor, QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor, QFont
+from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -53,7 +53,7 @@ _COMBO_TO_LEVEL = {
 class _LogBridge(QObject):
     """Signal bridge so worker threads can safely push records to the UI."""
 
-    record_posted = pyqtSignal(str, str)  # (level_name, formatted_line)
+    record_posted = Signal(str, str)  # (level_name, formatted_line)
 
 
 class QtLogHandler(logging.Handler):

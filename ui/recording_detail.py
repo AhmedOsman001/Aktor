@@ -5,9 +5,9 @@ Aktor design. Keeps FlowRecord's engine/model (ActionStep) underneath.
 
 from typing import Optional
 
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
@@ -86,7 +86,7 @@ def _subtitle(step) -> str:
 class _ClickFrame(QFrame):
     """A QFrame that emits ``clicked`` — used to make the hotkey field tappable."""
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -97,7 +97,7 @@ class _ClickFrame(QFrame):
 class _TimelineRow(QFrame):
     """A timeline step row with inline per-step delay + Smart Wait editing."""
 
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, step, parent=None):
         super().__init__(parent)
@@ -247,12 +247,12 @@ class _TimelineRow(QFrame):
 
 
 class RecordingDetailPage(QWidget):
-    back_requested = pyqtSignal()
-    play_requested = pyqtSignal(int, float, int, bool)  # id, speed, repeat, loop
-    duplicate_requested = pyqtSignal(int)
-    delete_requested = pyqtSignal(int)
-    hotkey_changed = pyqtSignal(int, str)
-    steps_changed = pyqtSignal()  # per-step delay / Smart Wait edited + saved
+    back_requested = Signal()
+    play_requested = Signal(int, float, int, bool)  # id, speed, repeat, loop
+    duplicate_requested = Signal(int)
+    delete_requested = Signal(int)
+    hotkey_changed = Signal(int, str)
+    steps_changed = Signal()  # per-step delay / Smart Wait edited + saved
 
     def __init__(self, parent=None):
         super().__init__(parent)

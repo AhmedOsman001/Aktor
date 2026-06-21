@@ -2,22 +2,22 @@ import logging
 from enum import Enum
 from typing import Optional
 
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
     Qt,
     QTimer,
     QThread,
     QPoint,
     QRect,
     QSize,
-    pyqtSignal,
+    Signal,
     QObject,
     QPropertyAnimation,
     QVariantAnimation,
     QEasingCurve,
     QParallelAnimationGroup,
 )
-from PyQt6.QtGui import QColor, QPainter, QCursor, QPen
-from PyQt6.QtWidgets import (
+from PySide6.QtGui import QColor, QPainter, QCursor, QPen
+from PySide6.QtWidgets import (
     QApplication,
     QWidget,
     QHBoxLayout,
@@ -161,10 +161,10 @@ class _BorderFlash(QWidget):
 
 
 class _OverlayBar(QWidget):
-    record_clicked = pyqtSignal()
-    stop_clicked = pyqtSignal()
-    pause_clicked = pyqtSignal()
-    workflows_clicked = pyqtSignal()
+    record_clicked = Signal()
+    stop_clicked = Signal()
+    pause_clicked = Signal()
+    workflows_clicked = Signal()
 
     def __init__(self):
         super().__init__(
@@ -466,15 +466,15 @@ class _OverlayBar(QWidget):
 
 
 class OverlayController(QObject):
-    record_requested = pyqtSignal()
-    stop_requested = pyqtSignal()
-    pause_requested = pyqtSignal()
-    workflows_requested = pyqtSignal()
+    record_requested = Signal()
+    stop_requested = Signal()
+    pause_requested = Signal()
+    workflows_requested = Signal()
 
     # Internal: marshal a callable onto the GUI thread. The player invokes the
     # overlay from its worker thread; touching Qt widgets there crashes/hangs Qt,
     # so all widget mutations are funneled through this queued signal.
-    _invoke = pyqtSignal(object)
+    _invoke = Signal(object)
 
     def __init__(self):
         super().__init__()

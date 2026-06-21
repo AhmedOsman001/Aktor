@@ -29,13 +29,13 @@ from flowrecord.logger_setup import setup_logging
 
 _log_file = setup_logging()
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication,
     QSystemTrayIcon,
     QMenu,
 )
-from PyQt6.QtGui import QAction, QIcon, QFont
-from PyQt6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QIcon, QFont
+from PySide6.QtCore import Qt, QTimer
 
 from flowrecord.config import APP_NAME, DATA_DIR, DEFAULT_RECORD_HOTKEY
 from flowrecord.listeners.hotkey_listener import register, unregister, unregister_all

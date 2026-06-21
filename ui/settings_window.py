@@ -5,8 +5,8 @@ Emits ``theme_mode_changed(mode)`` (system|light|dark) and
 ``pref_changed(key, value)``; the app persists + applies them.
 """
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -27,11 +27,11 @@ _HK_DEFAULTS = {
 
 
 class SettingsWindow(QWidget):
-    back_requested = pyqtSignal()
-    theme_mode_changed = pyqtSignal(str)       # system | light | dark
-    accent_changed = pyqtSignal(str)           # kept for API compat (unused)
-    pref_changed = pyqtSignal(str, object)
-    about_requested = pyqtSignal()             # kept for API compat (unused)
+    back_requested = Signal()
+    theme_mode_changed = Signal(str)       # system | light | dark
+    accent_changed = Signal(str)           # kept for API compat (unused)
+    pref_changed = Signal(str, object)
+    about_requested = Signal()             # kept for API compat (unused)
 
     def __init__(self, prefs: dict | None = None, parent=None):
         super().__init__(parent)

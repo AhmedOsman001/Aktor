@@ -10,8 +10,8 @@ min / maximize / close buttons on the right, with a hairline separator beneath
 it — matching the reference design.
 """
 
-from PyQt6.QtCore import QPoint, QSize, Qt
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtWidgets import (
     QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QVBoxLayout,
     QWidget,
 )

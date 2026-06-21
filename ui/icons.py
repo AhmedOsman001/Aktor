@@ -1,6 +1,6 @@
 """Crisp, theme-tinted vector icons rendered from inline SVG.
 
-Uses ``PyQt6.QtSvg`` (bundled with PyQt6 — no extra dependency). Icons are simple
+Uses ``PySide6.QtSvg`` (bundled with PySide6 — no extra dependency). Icons are simple
 geometric line/fill marks on a 24x24 grid. Each icon is tinted at render time to
 the requested color (defaults to the active theme's secondary text color), so the
 same source works in light and dark modes.
@@ -12,9 +12,9 @@ Usage::
     btn.setIcon(icons.icon("trash", color=theme.manager.color("DANGER").name()))
 """
 
-from PyQt6.QtCore import QByteArray, QRectF, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
-from PyQt6.QtSvg import QSvgRenderer
+from PySide6.QtCore import QByteArray, QRectF, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 
 from flowrecord.ui import theme
 
@@ -190,8 +190,8 @@ def app_icon(size: int = 32) -> QIcon:
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    from PyQt6.QtCore import QPointF
-    from PyQt6.QtGui import QLinearGradient, QPen
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QLinearGradient, QPen
 
     grad = QLinearGradient(0, 0, px, px)
     grad.setColorAt(0.0, accent2)
@@ -218,8 +218,8 @@ def app_icon(size: int = 32) -> QIcon:
 
 
 def _poly(points, w, h):
-    from PyQt6.QtCore import QPointF
-    from PyQt6.QtGui import QPolygonF
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QPolygonF
     return QPolygonF([QPointF(x * w, y * h) for x, y in points])
 
 

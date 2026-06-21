@@ -10,16 +10,17 @@ custom-painted.
 from datetime import datetime
 from typing import Optional
 
-from PyQt6.QtCore import (
-    QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtProperty,
-    pyqtSignal, QPropertyAnimation,
+from PySide6.QtCore import (
+    QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QTimer, Property,
+    Signal, QPropertyAnimation,
 )
-from PyQt6.QtGui import (
+from PySide6.QtGui import (
     QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen,
 )
-from PyQt6.QtWidgets import (
-    QAbstractButton, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QInputDialog,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+from PySide6.QtWidgets import (
+    QAbstractButton, QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy,
+    QVBoxLayout, QWidget,
 )
 
 from flowrecord.ui import icons, motion, theme
@@ -53,7 +54,7 @@ def ask_text(parent, title: str, label: str, text: str = "") -> tuple[str, bool]
     dlg.setLabelText(label)
     dlg.setInputMode(QInputDialog.InputMode.TextInput)
     dlg.setTextValue(text)
-    accepted = dlg.exec() == QInputDialog.DialogCode.Accepted
+    accepted = dlg.exec() == QDialog.DialogCode.Accepted
     return dlg.textValue(), accepted
 
 
@@ -338,7 +339,7 @@ class ToggleSwitch(QAbstractButton):
         self._pos = v
         self.update()
 
-    knob_pos = pyqtProperty(float, get_knob_pos, set_knob_pos)
+    knob_pos = Property(float, get_knob_pos, set_knob_pos)
 
     def _animate(self, checked: bool) -> None:
         self._anim.stop()
@@ -388,7 +389,7 @@ _SEGMENTED = """
 
 
 class SegmentedControl(QWidget):
-    changed = pyqtSignal(int)
+    changed = Signal(int)
 
     def __init__(self, options: list[str], index: int = 0, parent=None):
         super().__init__(parent)
@@ -443,7 +444,7 @@ _STEPPER = """
 
 
 class Stepper(QWidget):
-    valueChanged = pyqtSignal(int)
+    valueChanged = Signal(int)
 
     def __init__(self, value: int = 1, minimum: int = 1, maximum: int = 99,
                  suffix: str = "", parent=None):
@@ -656,7 +657,7 @@ class StatusBadge(QFrame):
 class _InsetRow(QWidget):
     """An InsetList row that can emit ``clicked`` (for tappable rows)."""
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -727,9 +728,9 @@ class InsetList(QFrame):
 # RecordingCard — grid + list variants
 # ===========================================================================
 class RecordingCard(QFrame):
-    play_clicked = pyqtSignal(int)
-    menu_clicked = pyqtSignal(int)
-    open_clicked = pyqtSignal(int)
+    play_clicked = Signal(int)
+    menu_clicked = Signal(int)
+    open_clicked = Signal(int)
 
     def __init__(self, workflow, variant: str = "grid", parent=None):
         super().__init__(parent)
