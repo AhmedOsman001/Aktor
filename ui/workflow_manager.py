@@ -7,6 +7,9 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
+    QGridLayout,
+    QInputDialog,
+    QStackedWidget,
     QDialog,
     QFileDialog,
     QDoubleSpinBox,
@@ -38,6 +41,14 @@ from flowrecord.storage.workflow_store import (
 )
 from flowrecord.ui import theme, icons, motion, win_effects
 from flowrecord.ui.log_panel import LogPanel
+from flowrecord.ui.title_bar import FramelessDialog
+from flowrecord.ui.settings_window import SettingsWindow
+from flowrecord.ui.recording_detail import RecordingDetailPage
+from flowrecord.ui.components import (
+    Logo, PillButton, RecordPill, RecordingCard, SearchInput,
+    SegmentedControl, _style, ask_text, confirm, info,
+)
+from flowrecord.storage import workflow_store as store
 
 logger = logging.getLogger(__name__)
 
@@ -673,222 +684,481 @@ class _EmptyState(QWidget):
         self._btn.setVisible(False)
 
 
-class WorkflowManagerWindow(QDialog):
-    play_requested = pyqtSignal(int)
-    new_requested = pyqtSignal()
-    test_steps_requested = pyqtSignal(object)
+_NAV_BASE = (
+    "text-align: left; border: 0; border-radius: 10px;"
+    " padding: 10px 12px; font-size: 14px;"
+)
+_NAV_ACTIVE = (
+    "QPushButton#navRow { %s background: @ACCENT_SOFT@;"
+    " color: @ACCENT_ON_SOFT@; font-weight: 600; }" % _NAV_BASE
+)
+_NAV_IDLE = (
+    "QPushButton#navRow { %s background: transparent; color: @BODY@;"
+    " font-weight: 500; }"
+    "QPushButton#navRow:hover { background: @CONTROL@; color: @HEADING@; }" % _NAV_BASE
+)
+
+
+class _LibraryPage(QWidget):
+    """Library page that keeps the floating Record pill pinned bottom-right."""
 
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle(f"{APP_NAME} \u2014 Workflows")
-        self.setMinimumSize(820, 580)
-        self.resize(1040, 740)
-        _connect_theme(self, self._on_theme_changed)
+        super().__init__(parent)
+        self.record_pill = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.record_pill is not None:
+            p = self.record_pill
+            p.adjustSize()
+            p.move(self.width() - p.width() - 28, self.height() - p.height() - 24)
+            p.raise_()
 
-        header = QHBoxLayout()
-        title = QLabel("FlowRecord")
-        title.setObjectName("titleLabel")
-        self._count_label = QLabel("")
-        self._count_label.setObjectName("infoLabel")
 
-        self._btn_new = QPushButton("  New")
-        self._btn_new.setObjectName("btnNew")
-        self._btn_new.setIconSize(QSize(14, 14))
-        self._btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_new.setToolTip("Record a new workflow")
-        self._btn_new.clicked.connect(self.new_requested.emit)
+class WorkflowManagerWindow(FramelessDialog):
+    play_requested = pyqtSignal(int, float, int, bool)  # id, speed, repeat, loop
+    new_requested = pyqtSignal()
+    test_steps_requested = pyqtSignal(object)
+    hotkeys_changed = pyqtSignal()  # a trigger changed → app re-registers hotkeys
+    theme_mode_requested = pyqtSignal(str)
+    accent_requested = pyqtSignal(str)
+    pref_changed = pyqtSignal(str, object)
 
-        self._btn_settings = QPushButton()
-        self._btn_settings.setObjectName("btnSettings")
-        self._btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_settings.setToolTip("More actions")
-        self._btn_settings.setFixedWidth(40)
-        self._btn_settings.clicked.connect(self._show_settings_menu)
+    def __init__(self, prefs: dict | None = None, parent=None):
+        super().__init__("FlowRecord", show_logo=True, parent=parent)
+        self.setObjectName("mgrRoot")
+        self.setMinimumSize(900, 620)
+        self.resize(1120, 760)
+        self._prefs = prefs or {}
+        self._view_mode = "grid"
+        self._tab = 0      # 0 all, 1 favorites, 2 recent
+        self._search = ""
+        self._workflows: list[Workflow] = []
+        self._active_nav = "library"
 
-        header.addWidget(title)
-        header.addWidget(self._count_label)
-        header.addStretch(1)
-        header.addWidget(self._btn_new)
-        header.addWidget(self._btn_settings)
+        host = QWidget()
+        hl = QHBoxLayout(host)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(0)
+        self._sidebar = self._build_sidebar()
+        hl.addWidget(self._sidebar)
+        self._stack = motion.SlidingStackedWidget()
+        hl.addWidget(self._stack, 1)
+        self.content_layout().addWidget(host)
 
-        self._search = _SearchBox()
-        self._search.textChanged.connect(self._apply_filter)
+        self._library = self._build_library()
+        self._activity = self._build_activity()
+        self._settings = SettingsWindow(self._prefs)
+        self._detail = RecordingDetailPage()
+        self._stack.addWidget(self._library)
+        self._stack.addWidget(self._activity)
+        self._stack.addWidget(self._settings)
+        self._stack.addWidget(self._detail)
+        self._wire_settings()
+        self._wire_detail()
+
+        theme.manager.changed.connect(self._apply_dialog_qss)
+        theme.manager.changed.connect(self._apply_local)
+        self._apply_dialog_qss()
+        self._apply_local()
+        self._load_workflows()
+        self.show_library()
+
+    # ------------------------------------------------------------------
+    # Sidebar
+    # ------------------------------------------------------------------
+    def _build_sidebar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("sidebar")
+        bar.setFixedWidth(216)
+        v = QVBoxLayout(bar)
+        v.setContentsMargins(12, 10, 12, 12)
+        v.setSpacing(4)
+
+        brand_lbl = QLabel("FLOWRECORD")
+        brand_lbl.setObjectName("sidebarBrand")
+        v.addWidget(brand_lbl)
+
+        self._nav = {}
+        self._nav_icons = {
+            "library": "library",
+            "activity": "activity",
+            "settings": "settings",
+        }
+        self._nav["library"] = self._nav_row("Library", self.show_library)
+        self._nav["activity"] = self._nav_row("Activity", self.show_activity)
+        self._nav["settings"] = self._nav_row("Settings", self.show_settings)
+        for key in ("library", "activity", "settings"):
+            v.addWidget(self._nav[key])
+
+        v.addStretch(1)
+
+        status = QFrame()
+        status.setObjectName("statusWidget")
+        sv = QVBoxLayout(status)
+        sv.setContentsMargins(12, 10, 12, 10)
+        sv.setSpacing(3)
+        line = QHBoxLayout()
+        line.setSpacing(8)
+        dot = QFrame()
+        dot.setObjectName("statusDot")
+        dot.setFixedSize(8, 8)
+        running = QLabel("Running in tray")
+        running.setObjectName("statusMain")
+        line.addWidget(dot)
+        line.addWidget(running)
+        line.addStretch(1)
+        sv.addLayout(line)
+        sub = QLabel("Listening for hotkeys")
+        sub.setObjectName("statusSub")
+        sv.addWidget(sub)
+        v.addWidget(status)
+        return bar
+
+    def _nav_row(self, text: str, on_click) -> QPushButton:
+        b = QPushButton("  " + text)
+        b.setObjectName("navRow")
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setIconSize(QSize(18, 18))
+        b.clicked.connect(lambda: on_click())
+        return b
+
+    def _set_active_nav(self, name) -> None:
+        self._active_nav = name
+        for key, b in self._nav.items():
+            active = key == name
+            b.setStyleSheet(_style(_NAV_ACTIVE if active else _NAV_IDLE))
+            tint = theme.manager.color("ACCENT_ON_SOFT" if active else "BODY").name()
+            b.setIcon(icons.icon(self._nav_icons[key], tint, 18))
+
+    # ------------------------------------------------------------------
+    # Library page
+    # ------------------------------------------------------------------
+    def _build_library(self) -> "_LibraryPage":
+        page = _LibraryPage()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(28, 18, 28, 18)
+        v.setSpacing(14)
+
+        title = QLabel("Recordings")
+        title.setObjectName("bigTitle")
+        v.addWidget(title)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(10)
+        self._tabs = SegmentedControl(["All", "Favorites", "Recent"], index=0)
+        self._tabs.changed.connect(self._on_tab)
+        self._view_toggle = SegmentedControl(["Grid", "List"], index=0)
+        self._view_toggle.changed.connect(self._on_view)
+        controls.addWidget(self._tabs)
+        controls.addStretch(1)
+        controls.addWidget(self._view_toggle)
+        v.addLayout(controls)
+
+        self._search_box = SearchInput("Search recordings…")
+        self._search_box.textChanged.connect(self._on_search)
+        v.addWidget(self._search_box)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("background: transparent;")
+        self._scroll.viewport().setStyleSheet("background: transparent;")
+        v.addWidget(self._scroll, 1)
 
-        self._list_container = QWidget()
-        self._list_container.setObjectName("listContainer")
-        self._list_layout = QVBoxLayout(self._list_container)
-        self._list_layout.setContentsMargins(0, 0, 4, 0)
-        self._list_layout.setSpacing(8)
+        pill = RecordPill("Record")
+        pill.clicked.connect(self.new_requested.emit)
+        pill.setParent(page)
+        page.record_pill = pill
+        return page
 
-        self._empty = _EmptyState()
-        self._empty.record_clicked.connect(self.new_requested.emit)
-        self._list_layout.addWidget(self._empty)
-        self._list_layout.addStretch(1)
-
-        self._scroll.setWidget(self._list_container)
-
-        # Activity log panel (bottom)
+    def _build_activity(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(28, 18, 28, 24)
+        v.setSpacing(14)
+        title = QLabel("Activity")
+        title.setObjectName("bigTitle")
+        v.addWidget(title)
+        # The live activity log, now its own tab instead of a bottom bar.
         self._log_panel = LogPanel()
-        self._log_panel.setMinimumHeight(150)
+        v.addWidget(self._log_panel, 1)
+        return page
 
-        self._splitter = QSplitter(Qt.Orientation.Vertical)
-        self._splitter.setHandleWidth(8)
-        self._splitter.setChildrenCollapsible(True)
-        self._splitter.addWidget(self._scroll)
-        self._splitter.addWidget(self._log_panel)
-        self._splitter.setStretchFactor(0, 1)
-        self._splitter.setStretchFactor(1, 0)
-        self._splitter.setSizes([540, 220])
-
-        layout.addLayout(header)
-        layout.addWidget(self._search)
-        layout.addWidget(self._splitter, 1)
-
-        self._workflows: list[Workflow] = []
-        self._rows: list[tuple[Workflow, WorkflowRowWidget]] = []
-        self._apply_icons()
-        self._load_workflows()
-
-    def _apply_icons(self) -> None:
-        self._btn_new.setIcon(icons.icon("plus", "#ffffff", 14))
-        self._btn_settings.setIcon(
-            icons.icon("settings", theme.manager.color("TEXT_SECONDARY").name(), 16)
+    def _build_empty(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.setSpacing(14)
+        logo_box = QHBoxLayout()
+        logo_box.addStretch(1)
+        logo_box.addWidget(Logo(56))
+        logo_box.addStretch(1)
+        title = QLabel("No recordings yet")
+        title.setObjectName("emptyTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub = QLabel(
+            f"Press {DEFAULT_RECORD_HOTKEY} or click below to capture your first macro."
         )
-        self._search.retint()
-        self._log_panel.retint()
-        self._empty.retint()
+        sub.setObjectName("emptySub")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        btn = PillButton("●  Record your first workflow", "primary")
+        btn.clicked.connect(self.new_requested.emit)
+        btn_box = QHBoxLayout()
+        btn_box.addStretch(1)
+        btn_box.addWidget(btn)
+        btn_box.addStretch(1)
+        lay.addStretch(1)
+        lay.addLayout(logo_box)
+        lay.addWidget(title)
+        lay.addWidget(sub)
+        lay.addLayout(btn_box)
+        lay.addStretch(1)
+        w.setStyleSheet(_style(
+            "#emptyTitle { color: @HEADING@; font-size: 18px; font-weight: 700; }"
+            "#emptySub { color: @MUTED@; font-size: 13px; }"
+        ))
+        return w
 
-    def _on_theme_changed(self) -> None:
-        self._apply_icons()
-        self._load_workflows()
-
+    # ------------------------------------------------------------------
+    # Population / filtering
+    # ------------------------------------------------------------------
     def refresh(self) -> None:
         self._load_workflows()
-        self._apply_filter(self._search.text())
+
+    def _reload_soon(self) -> None:
+        # Rebuild on the next event-loop tick so cards are never deleted while
+        # still inside one of their own signal handlers (modal editor / menu).
+        QTimer.singleShot(0, self._load_workflows)
 
     def _load_workflows(self) -> None:
-        for _, row in self._rows:
-            row.setParent(None)
-            row.deleteLater()
-        self._rows.clear()
+        self._workflows = store.get_all_workflows()
+        self._populate()
 
-        self._workflows = get_all_workflows()
+    def _filtered(self) -> list:
+        items = self._workflows
+        if self._tab == 1:
+            items = [w for w in items if w.favorite]
+        elif self._tab == 2:
+            items = [w for w in items if w.last_run is not None]
+        if self._search:
+            needle = self._search.lower()
+            items = [w for w in items if needle in w.name.lower()]
+        return items
 
-        for wf in self._workflows:
-            full = get_workflow(wf.id)
-            step_count = len(full.steps) if full else 0
-            row = WorkflowRowWidget(wf, step_count)
-            row.run_clicked.connect(self._on_run)
-            row.edit_clicked.connect(self._on_edit)
-            row.delete_clicked.connect(self._on_delete)
-            row.rename_requested.connect(self._on_rename)
-            insert_index = self._list_layout.count() - 1
-            self._list_layout.insertWidget(insert_index, row)
-            self._rows.append((wf, row))
+    def _populate(self) -> None:
+        items = self._filtered()
+        container = QWidget()
+        container.setStyleSheet("background: transparent;")
 
-        if not self._rows:
-            self._empty.set_default(DEFAULT_RECORD_HOTKEY)
-        self._empty.setVisible(not self._rows)
-        self._update_count()
-
-    def _update_count(self) -> None:
-        n = len(self._workflows)
-        self._count_label.setText(f"{n} workflow{'s' if n != 1 else ''}")
-
-    def _apply_filter(self, text: str) -> None:
-        needle = text.strip().lower()
-        for wf, row in self._rows:
-            row.setVisible(not needle or needle in wf.name.lower())
-
-        if not self._rows:
-            self._empty.set_default(DEFAULT_RECORD_HOTKEY)
-            self._empty.setVisible(True)
+        if not items:
+            box = QVBoxLayout(container)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.addWidget(self._build_empty())
+            self._scroll.setWidget(container)
             return
 
-        any_visible = any(row.isVisible() for _, row in self._rows)
-        if any_visible:
-            self._empty.setVisible(False)
+        if self._view_mode == "grid":
+            grid = QGridLayout(container)
+            grid.setContentsMargins(14, 10, 18, 22)  # room so shadows don't clip
+            grid.setSpacing(22)
+            cols = self._grid_cols()
+            for i, wf in enumerate(items):
+                card = self._make_card(wf, "grid")
+                card.setMinimumWidth(240)
+                grid.addWidget(card, i // cols, i % cols)
+            for c in range(cols):
+                grid.setColumnStretch(c, 1)
+            grid.setRowStretch((len(items) // cols) + 1, 1)
         else:
-            self._empty.set_no_match(text.strip())
-            self._empty.setVisible(True)
+            box = QVBoxLayout(container)
+            box.setContentsMargins(14, 10, 18, 22)
+            box.setSpacing(16)
+            for wf in items:
+                box.addWidget(self._make_card(wf, "list"))
+            box.addStretch(1)
 
-    def _on_run(self, wf_id: int) -> None:
-        # Keep the window open so the Activity log streams live during playback.
-        self.play_requested.emit(wf_id)
+        self._scroll.setWidget(container)
+
+    def _grid_cols(self) -> int:
+        vpw = self._scroll.viewport().width()
+        if vpw < 50:
+            vpw = max(600, self.width() - 240)
+        return max(1, min(4, (vpw + 22) // (260 + 22)))
+
+    def _make_card(self, wf, variant: str):
+        card = RecordingCard(wf, variant)
+        card.play_clicked.connect(lambda wid: self.play_requested.emit(wid, 1.0, 1, False))
+        card.open_clicked.connect(self.show_detail)
+        card.menu_clicked.connect(self._show_card_menu)
+        return card
+
+    def _on_tab(self, index: int) -> None:
+        self._tab = index
+        self._populate()
+
+    def _on_view(self, index: int) -> None:
+        self._view_mode = "grid" if index == 0 else "list"
+        self._populate()
+
+    def _on_search(self, text: str) -> None:
+        self._search = text.strip()
+        self._populate()
+
+    # ------------------------------------------------------------------
+    # Card actions
+    # ------------------------------------------------------------------
+    def _show_card_menu(self, wf_id: int) -> None:
+        wf = next((w for w in self._workflows if w.id == wf_id), None)
+        if wf is None:
+            return
+        menu = QMenu(self)
+        act_play = menu.addAction("Play")
+        act_open = menu.addAction("Open")
+        act_rename = menu.addAction("Rename")
+        act_fav = menu.addAction("Unfavorite" if wf.favorite else "Favorite")
+        act_dup = menu.addAction("Duplicate")
+        menu.addSeparator()
+        act_del = menu.addAction("Delete")
+        chosen = menu.exec(self.cursor().pos())
+        if chosen is act_play:
+            self.play_requested.emit(wf_id, 1.0, 1, False)
+        elif chosen is act_open:
+            self.show_detail(wf_id)
+        elif chosen is act_rename:
+            self._rename(wf_id, wf.name)
+        elif chosen is act_fav:
+            store.set_favorite(wf_id, not wf.favorite)
+            self._reload_soon()
+        elif chosen is act_dup:
+            self._duplicate(wf_id)
+        elif chosen is act_del:
+            self._on_delete(wf_id)
+
+    def _rename(self, wf_id: int, current: str) -> None:
+        name, ok = ask_text(self, "Rename", "New name:", current)
+        if ok and name.strip():
+            store.update_workflow_name(wf_id, name.strip())
+            self._reload_soon()
+
+    def _duplicate(self, wf_id: int) -> None:
+        full = store.get_workflow(wf_id)
+        if not full:
+            return
+        copy = Workflow(
+            name=f"{full.name} (copy)",
+            steps=full.steps,
+            trigger=Trigger(hotkey=None),
+        )
+        store.save_workflow(copy)
+        self._reload_soon()
+
+    def _on_delete(self, wf_id: int) -> None:
+        wf = next((w for w in self._workflows if w.id == wf_id), None)
+        name = wf.name if wf else "this recording"
+        if confirm(self, "Delete recording",
+                   f"Delete “{name}”?\nThis cannot be undone.",
+                   yes="Delete", no="Cancel"):
+            store.delete_workflow(wf_id)
+            self._reload_soon()
 
     def _on_edit(self, wf_id: int) -> None:
-        full = get_workflow(wf_id)
+        full = store.get_workflow(wf_id)
         if not full:
             return
         editor = StepEditorWindow(full, self)
         editor.test_requested.connect(self.test_steps_requested)
         editor.exec()
-        self._load_workflows()
-        self._apply_filter(self._search.text())
+        self._reload_soon()
 
-    def _on_delete(self, wf_id: int) -> None:
-        wf = next((w for w in self._workflows if w.id == wf_id), None)
-        name = wf.name if wf else "this workflow"
-        reply = QMessageBox.question(
-            self, "Delete Workflow",
-            f"Delete “{name}”?\nThis action cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            delete_workflow(wf_id)
-            self._load_workflows()
-            self._apply_filter(self._search.text())
+    # ------------------------------------------------------------------
+    # Navigation
+    # ------------------------------------------------------------------
+    def show_library(self) -> None:
+        self._stack.slide_to_widget(self._library)
+        self._set_active_nav("library")
 
-    def _on_rename(self, wf_id: int, new_name: str) -> None:
-        update_workflow_name(wf_id, new_name)
-        for wf, _ in self._rows:
-            if wf.id == wf_id:
-                wf.name = new_name
-                break
+    def show_activity(self) -> None:
+        self._stack.slide_to_widget(self._activity)
+        self._set_active_nav("activity")
 
-    def _show_settings_menu(self) -> None:
-        menu = QMenu(self)
-        act_import = menu.addAction("Import workflow\u2026")
-        act_refresh = menu.addAction("Refresh list")
-        chosen = menu.exec(
-            self._btn_settings.mapToGlobal(self._btn_settings.rect().bottomLeft())
-        )
-        if chosen is act_import:
-            self._import_workflow()
-        elif chosen is act_refresh:
-            self.refresh()
+    def show_settings(self) -> None:
+        self._stack.slide_to_widget(self._settings)
+        self._set_active_nav("settings")
 
-    def _import_workflow(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import Workflow", "",
-            "FlowRecord Files (*.flowrecord);;All Files (*)",
-        )
-        if not path:
+    def show_detail(self, wf_id: int) -> None:
+        full = store.get_workflow(wf_id)
+        if not full:
             return
+        self._detail.set_workflow(full)
+        self._stack.slide_to_widget(self._detail)
+        self._set_active_nav(None)
+
+    def _wire_detail(self) -> None:
+        d = self._detail
+        d.back_requested.connect(self.show_library)
+        d.play_requested.connect(self.play_requested.emit)
+        d.duplicate_requested.connect(lambda wid: (self._duplicate(wid), self.show_library()))
+        d.delete_requested.connect(lambda wid: (self._on_delete(wid), self.show_library()))
+        d.hotkey_changed.connect(self._on_hotkey_changed)
+        d.steps_changed.connect(self._reload_soon)
+
+    def _on_hotkey_changed(self, wf_id: int, hotkey: str) -> None:
+        # Pass the raw string (incl. "" to clear); update_trigger only skips on None.
+        update_trigger(wf_id, hotkey.strip())
+        self.hotkeys_changed.emit()
+        self._reload_soon()
+
+    def _wire_settings(self) -> None:
+        s = self._settings
+        s.back_requested.connect(self.show_library)
+        s.theme_mode_changed.connect(self.theme_mode_requested.emit)
+        s.accent_changed.connect(self.accent_requested.emit)
+        s.pref_changed.connect(self.pref_changed.emit)
+        s.about_requested.connect(self._show_about)
+
+    def _show_about(self) -> None:
+        info(
+            self, f"About {APP_NAME}",
+            f"{APP_NAME}\n\nRecord and replay desktop automations with UI-aware\n"
+            "element detection and Smart Wait, triggered by global hotkeys.",
+        )
+
+    # ------------------------------------------------------------------
+    # Styling
+    # ------------------------------------------------------------------
+    def _apply_dialog_qss(self) -> None:
+        # Reuse the heavy dialog QSS for standard children (inputs, lists, log
+        # panel, scrollbars). The window is opaque now, so paint its background
+        # the canvas color (DWM rounds the actual window corners).
+        canvas = theme.manager.tokens().get("CANVAS", "#1c1c1e")
+        self.setStyleSheet(
+            theme.manager.qss_dialog()
+            + f"\nQDialog#mgrRoot {{ background: {canvas}; }}"
+        )
+
+    def _apply_local(self) -> None:
+        self._sidebar.setStyleSheet(_style(
+            "#sidebar { background: @SIDEBAR@; border-right: 1px solid @HAIRLINE@; }"
+            "#sidebarBrand { color: @MUTED@; font-size: 11px; font-weight: 700;"
+            " letter-spacing: 1px; padding: 8px 12px 6px; background: transparent; }"
+            "#statusWidget { background: @CONTROL@; border-radius: 12px; }"
+            "#statusDot { background: @SUCCESS@; border-radius: 4px; }"
+            "#statusMain { color: @HEADING@; font-size: 13px; font-weight: 600;"
+            " background: transparent; }"
+            "#statusSub { color: @MUTED@; font-size: 12px; background: transparent; }"
+        ))
+        big_title = _style(
+            "#bigTitle { color: @HEADING@; font-size: 28px; font-weight: 800; }"
+        )
+        self._library.setStyleSheet(big_title)
+        self._activity.setStyleSheet(big_title)
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            wf = _dict_to_workflow(data)
-            wf_id = save_workflow(wf)
-            logger.info("Imported workflow '%s' (id=%d)", wf.name, wf_id)
-            self._load_workflows()
-            self._apply_filter(self._search.text())
+            self._log_panel.retint()
         except Exception:
-            logger.exception("Import failed")
-            QMessageBox.warning(
-                self, "Import Error",
-                f"Failed to import workflow:\n{traceback.format_exc()}",
-            )
+            pass
+        self._set_active_nav(self._active_nav)
 
 
 def _workflow_to_dict(wf: Workflow) -> dict:

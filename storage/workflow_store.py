@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS workflows (
     trigger_voice TEXT,
     created_at TEXT NOT NULL,
     last_run TEXT,
-    run_count INTEGER NOT NULL DEFAULT 0
+    run_count INTEGER NOT NULL DEFAULT 0,
+    favorite INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -70,6 +71,7 @@ def init_db(db_path: Optional[Path] = None) -> None:
         _migrate(conn)
         _migrate_smart_wait(conn)
         _migrate_element_attrs(conn)
+        _migrate_favorite(conn)
         logger.debug("init_db: tables ready at %s", db_path or DB_PATH)
     finally:
         conn.close()
@@ -96,6 +98,17 @@ def _migrate_smart_wait(conn: sqlite3.Connection) -> None:
         if "smart_wait_on_timeout" not in cols:
             conn.execute("ALTER TABLE steps ADD COLUMN smart_wait_on_timeout TEXT DEFAULT 'stop'")
         conn.commit()
+    except Exception:
+        pass
+
+
+def _migrate_favorite(conn: sqlite3.Connection) -> None:
+    """Add the favorite flag to existing workflow tables without data loss."""
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(workflows)").fetchall()]
+        if "favorite" not in cols:
+            conn.execute("ALTER TABLE workflows ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
     except Exception:
         pass
 
@@ -228,19 +241,22 @@ def get_all_workflows(db_path: Optional[Path] = None) -> list[Workflow]:
     conn = _get_conn(db_path)
     try:
         rows = conn.execute(
-            "SELECT * FROM workflows ORDER BY created_at DESC"
+            "SELECT * FROM workflows ORDER BY (last_run IS NULL), last_run DESC, created_at DESC"
         ).fetchall()
 
         workflows = []
         for row in rows:
             wf = _row_to_workflow(row)
-            step_count = conn.execute(
-                "SELECT COUNT(*) FROM steps WHERE workflow_id = ?", (wf.id,)
-            ).fetchone()[0]
+            agg = conn.execute(
+                "SELECT COUNT(*) AS c, COALESCE(SUM(delay_after), 0) AS d "
+                "FROM steps WHERE workflow_id = ?", (wf.id,)
+            ).fetchone()
+            wf._step_count = int(agg["c"])
+            wf._duration_secs = float(agg["d"])
             wf.steps = []
             workflows.append(wf)
 
-        logger.debug("get_all_workflows: %d workflows, steps=%s", len(workflows), [len(w.steps) for w in workflows])
+        logger.debug("get_all_workflows: %d workflows", len(workflows))
         return workflows
     finally:
         conn.close()
@@ -268,6 +284,19 @@ def update_workflow_name(workflow_id: int, name: str, db_path: Optional[Path] = 
         )
         conn.commit()
         logger.debug("update_workflow_name: id=%d name=%r", workflow_id, name)
+    finally:
+        conn.close()
+
+
+def set_favorite(workflow_id: int, favorite: bool, db_path: Optional[Path] = None) -> None:
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "UPDATE workflows SET favorite = ? WHERE id = ?",
+            (1 if favorite else 0, workflow_id),
+        )
+        conn.commit()
+        logger.debug("set_favorite: id=%d favorite=%s", workflow_id, favorite)
     finally:
         conn.close()
 
@@ -306,6 +335,7 @@ def update_trigger(workflow_id: int, hotkey: Optional[str] = None, voice_phrase:
 
 
 def _row_to_workflow(row: sqlite3.Row) -> Workflow:
+    favorite = bool(row["favorite"]) if "favorite" in row.keys() else False
     return Workflow(
         id=row["id"],
         name=row["name"],
@@ -315,6 +345,7 @@ def _row_to_workflow(row: sqlite3.Row) -> Workflow:
         ),
         created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else None,
         last_run=datetime.fromisoformat(row["last_run"]) if row["last_run"] else None,
+        favorite=favorite,
     )
 
 

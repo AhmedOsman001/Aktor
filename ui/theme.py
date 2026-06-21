@@ -27,78 +27,113 @@ from PyQt6.QtGui import QColor
 # Palettes (neutral surfaces / borders / text)
 # ---------------------------------------------------------------------------
 
+# Component-library palette ("Aktor" iOS-like calm: blue accent, clean surfaces).
+# Token *names* are kept stable so existing painter code and QSS keep resolving;
+# only the values change to the new design language.
+
 _DARK = {
-    "BG_APP": "#0a0a10",
-    "BG_SURFACE": "#16161f",
-    "BG_ELEVATED": "#20202c",
-    "BG_INSET": "#0d0d14",
-    "BG_OVERLAY": "#17171f",
-    "OVERLAY_BG": "rgba(20, 20, 28, 232)",
-    "OVERLAY_TOP": "#24242f",
-    # Window backdrop gradient (cool, slightly blue-tinted depth)
-    "BG_GRAD_TOP": "#1a1a26",
-    "BG_GRAD_BOTTOM": "#0a0a10",
-    # Card gradient
-    "CARD_TOP": "#1c1c27",
-    "CARD_BOTTOM": "#15151d",
-    "CARD_HOVER_TOP": "#24243150",
-    "BORDER": "rgba(255,255,255,0.08)",
-    "BORDER_STRONG": "rgba(255,255,255,0.15)",
-    "HAIRLINE": "rgba(255,255,255,0.05)",
+    "BG_APP": "#1c1c1e",          # canvas
+    "BG_SURFACE": "#2c2c2e",      # cards / surfaces
+    "BG_ELEVATED": "#3a3a3c",     # elevated control fill
+    "BG_INSET": "#3a3a3c",        # filled inputs / segmented track
+    "BG_OVERLAY": "#2c2c2e",
+    "OVERLAY_BG": "rgba(40, 40, 43, 236)",
+    "OVERLAY_TOP": "#3a3a3c",
+    # Calm flat canvas (no heavy gradient depth).
+    "BG_GRAD_TOP": "#1c1c1e",
+    "BG_GRAD_BOTTOM": "#1c1c1e",
+    # Flat card surface.
+    "CARD_TOP": "#2c2c2e",
+    "CARD_BOTTOM": "#2c2c2e",
+    "CARD_HOVER_TOP": "#323234",
+    "CONTROL_FILL": "#3a3a3c",    # search, inputs, segmented track, secondary btn
+    "BORDER": "#38383a",          # hairline / divider
+    "BORDER_STRONG": "rgba(255,255,255,0.20)",
+    "HAIRLINE": "#38383a",
     "GLASS_HI": "rgba(255,255,255,0.06)",
-    "GLASS_HI_STRONG": "rgba(255,255,255,0.14)",
-    "TEXT_PRIMARY": "#f3f3f8",
-    "TEXT_SECONDARY": "#a2a2b0",
-    "TEXT_MUTED": "#6a6a78",
-    "TEXT_DISABLED": "#494954",
+    "GLASS_HI_STRONG": "rgba(255,255,255,0.13)",
+    "TEXT_PRIMARY": "#f5f5f7",    # heading
+    "TEXT_SECONDARY": "#c7c7cc",  # body
+    "TEXT_MUTED": "#8e8e93",      # meta / muted
+    "TEXT_DISABLED": "#5a5a5e",
     "TEXT_ON_ACCENT": "#ffffff",
+    # Status / badge soft fills + text (per-mode).
+    "SUCCESS_SOFT": "rgba(34,197,94,0.20)",
+    "SUCCESS_TEXT": "#4ade80",
+    "DANGER_SOFT": "rgba(239,68,68,0.20)",
+    "DANGER_TEXT": "#ff6b6b",
+    "IDLE_SOFT": "rgba(255,255,255,0.08)",
+    "IDLE_TEXT": "#a1a1a6",
+    # Component-library extras (dark)
+    "SEG_SEL": "#5a5a5e",
+    "CHIP_FILL": "#3a3a3c",
+    "CHIP_BORDER": "#4a4a4c",
+    "SIDEBAR": "rgba(36,36,38,0.94)",
+    "DISABLED_FILL": "#2a2a2c",
+    "IDLE_DOT": "#9ca3af",
 }
 
 _LIGHT = {
-    "BG_APP": "#eef0f5",
-    "BG_SURFACE": "#ffffff",
-    "BG_ELEVATED": "#f3f4f8",
-    "BG_INSET": "#eaecf1",
-    "BG_OVERLAY": "#fbfbfd",
-    "OVERLAY_BG": "rgba(252, 252, 255, 235)",
+    "BG_APP": "#f5f6f8",          # canvas
+    "BG_SURFACE": "#ffffff",      # cards / surfaces
+    "BG_ELEVATED": "#f1f3f5",
+    "BG_INSET": "#f1f3f5",        # filled inputs / segmented track
+    "BG_OVERLAY": "#ffffff",
+    "OVERLAY_BG": "rgba(255, 255, 255, 238)",
     "OVERLAY_TOP": "#ffffff",
-    "BG_GRAD_TOP": "#ffffff",
-    "BG_GRAD_BOTTOM": "#e9ebf2",
+    "BG_GRAD_TOP": "#f5f6f8",
+    "BG_GRAD_BOTTOM": "#f5f6f8",
     "CARD_TOP": "#ffffff",
-    "CARD_BOTTOM": "#f5f6fa",
-    "CARD_HOVER_TOP": "#f0f1f8",
-    "BORDER": "rgba(0,0,0,0.10)",
-    "BORDER_STRONG": "rgba(0,0,0,0.18)",
-    "HAIRLINE": "rgba(0,0,0,0.07)",
+    "CARD_BOTTOM": "#ffffff",
+    "CARD_HOVER_TOP": "#ffffff",
+    "CONTROL_FILL": "#f1f3f5",
+    "BORDER": "#e5e7eb",          # hairline / divider
+    "BORDER_STRONG": "rgba(0,0,0,0.14)",
+    "HAIRLINE": "#e5e7eb",
     "GLASS_HI": "rgba(0,0,0,0.04)",
-    "GLASS_HI_STRONG": "rgba(0,0,0,0.10)",
-    "TEXT_PRIMARY": "#16161d",
-    "TEXT_SECONDARY": "#50505b",
-    "TEXT_MUTED": "#80808c",
-    "TEXT_DISABLED": "#b2b2ba",
+    "GLASS_HI_STRONG": "rgba(0,0,0,0.08)",
+    "TEXT_PRIMARY": "#111827",    # heading
+    "TEXT_SECONDARY": "#374151",  # body
+    "TEXT_MUTED": "#9ca3af",      # meta / muted
+    "TEXT_DISABLED": "#c0c4cc",
     "TEXT_ON_ACCENT": "#ffffff",
+    "SUCCESS_SOFT": "#dcfce7",
+    "SUCCESS_TEXT": "#16a34a",
+    "DANGER_SOFT": "#fee2e2",
+    "DANGER_TEXT": "#ef4444",
+    "IDLE_SOFT": "#f1f3f5",
+    "IDLE_TEXT": "#6b7280",
+    # Component-library extras (light)
+    "SEG_SEL": "#ffffff",
+    "CHIP_FILL": "#ffffff",
+    "CHIP_BORDER": "#e5e7eb",
+    "SIDEBAR": "rgba(250,251,252,0.94)",
+    "DISABLED_FILL": "#f3f4f6",
+    "IDLE_DOT": "#9ca3af",
 }
 
-# Semantic colors — shared across modes (read fine on both surfaces).
+# Solid semantic colors — shared across modes. (Soft fills + status text live in
+# the per-mode palettes above.)
 _SEMANTIC = {
-    "DANGER": "#e5484d",
-    "DANGER_HOVER": "#f3555a",
-    "DANGER_PRESSED": "#cd3a3f",
-    "DANGER_SOFT": "rgba(229,72,77,0.14)",
-    "SUCCESS": "#30a46c",
-    "SUCCESS_HOVER": "#37b578",
-    "SUCCESS_PRESSED": "#2a9261",
-    "SUCCESS_SOFT": "rgba(48,164,108,0.14)",
-    "WARNING": "#f5a524",
+    "DANGER": "#ef4444",
+    "DANGER_HOVER": "#dc2626",
+    "DANGER_PRESSED": "#b91c1c",
+    "SUCCESS": "#22c55e",
+    "SUCCESS_HOVER": "#16a34a",
+    "SUCCESS_PRESSED": "#15803d",
+    "WARNING": "#f59e0b",
+    # Record identity — gradient pill (floating / overlay record button).
+    "RECORD_GRAD_TOP": "#ff5a5a",
+    "RECORD_GRAD_BOTTOM": "#f43f5e",
 }
 
-_FONT_BASE = '"Segoe UI", "Segoe UI Variable", sans-serif'
+_FONT_BASE = '"Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif'
 
 DEFAULT_MODE = "dark"
-DEFAULT_ACCENT = "#5e6ad2"
+DEFAULT_ACCENT = "#2563eb"
 
-# Recording red (for the live pulse dot) — independent of theme/accent.
-RECORD_RED = QColor(232, 57, 70)
+# Recording red (for the live pulse dot) — matches the record gradient identity.
+RECORD_RED = QColor(244, 63, 94)
 
 
 def qc(hex_or_rgba: str) -> QColor:
@@ -115,20 +150,27 @@ def _rgba(c: QColor, alpha: float) -> str:
     return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
 
 
-def _accent_ramp(base: str) -> dict:
-    """Derive the accent-related tokens from a single base accent color."""
+def _accent_ramp(base: str, mode: str = "dark") -> dict:
+    """Derive the accent-related tokens from a single base accent color.
+
+    For the component-library blue (#2563EB) the hover/pressed states *darken*
+    (#1D4ED8 …), and the soft fill is light on white / translucent on dark.
+    """
     c = QColor(base)
     if not c.isValid():
         c = QColor(DEFAULT_ACCENT)
+    is_light = mode == "light"
+    soft_alpha = 0.12 if is_light else 0.24
     return {
         "ACCENT": c.name(),
-        "ACCENT_HOVER": c.lighter(118).name(),
-        "ACCENT_PRESSED": c.darker(112).name(),
-        "ACCENT_2": c.lighter(140).name(),  # brighter companion for gradients
-        "ACCENT_SOFT": _rgba(c, 0.16),
-        "ACCENT_GLOW": _rgba(c, 0.32),
+        "ACCENT_HOVER": c.darker(112).name(),
+        "ACCENT_PRESSED": c.darker(126).name(),
+        "ACCENT_2": c.lighter(112).name(),  # subtle lighter companion
+        "ACCENT_SOFT": _rgba(c, soft_alpha),
+        "ACCENT_ON_SOFT": c.name() if is_light else c.lighter(155).name(),
+        "ACCENT_GLOW": _rgba(c, 0.34),
         "BORDER_FOCUS": _rgba(c, 0.60),
-        "SELECTION": _rgba(c, 0.22),
+        "SELECTION": _rgba(c, 0.20),
         "GLOW": _rgba(c, 0.55),
     }
 
@@ -138,7 +180,23 @@ def _build_tokens(mode: str, accent: str) -> dict:
     tokens = {"FONT_BASE": _FONT_BASE}
     tokens.update(palette)
     tokens.update(_SEMANTIC)
-    tokens.update(_accent_ramp(accent))
+    tokens.update(_accent_ramp(accent, mode))
+    # Component-library aliases — let widgets ported from the Aktor design use
+    # short token names (@SURFACE@, @HEADING@, …) that map onto FlowRecord's set.
+    tokens.update({
+        "SURFACE": tokens["BG_SURFACE"],
+        "CANVAS": tokens["BG_APP"],
+        "CONTROL": tokens["CONTROL_FILL"],
+        "ELEVATED": tokens["BG_ELEVATED"],
+        "HEADING": tokens["TEXT_PRIMARY"],
+        "BODY": tokens["TEXT_SECONDARY"],
+        "MUTED": tokens["TEXT_MUTED"],
+        "ON_ACCENT": tokens["TEXT_ON_ACCENT"],
+        "RECORD_TOP": tokens["RECORD_GRAD_TOP"],
+        "RECORD_BOTTOM": tokens["RECORD_GRAD_BOTTOM"],
+        "ACCENT_SOFT_2": tokens["ACCENT_SOFT"],
+        "DISABLED_TEXT": tokens["TEXT_DISABLED"],
+    })
     return tokens
 
 
@@ -213,18 +271,18 @@ QToolTip {
 QMenu {
     background-color: @BG_SURFACE@;
     border: 1px solid @BORDER@;
-    border-radius: 8px;
-    padding: 5px;
+    border-radius: 14px;
+    padding: 6px;
     color: @TEXT_PRIMARY@;
-    font-size: 12px;
+    font-size: 13px;
 }
 QMenu::item {
-    padding: 7px 26px 7px 14px;
-    border-radius: 6px;
+    padding: 9px 28px 9px 14px;
+    border-radius: 9px;
     margin: 1px 2px;
 }
-QMenu::item:selected { background-color: @ACCENT@; color: @TEXT_ON_ACCENT@; }
-QMenu::separator { height: 1px; background: @BORDER@; margin: 5px 8px; }
+QMenu::item:selected { background-color: @CONTROL_FILL@; color: @TEXT_PRIMARY@; }
+QMenu::separator { height: 1px; background: @BORDER@; margin: 6px 8px; }
 QMenu::right-arrow, QMenu::tearoff { image: none; width: 0; }
 
 QInputDialog, QMessageBox {
@@ -234,21 +292,21 @@ QInputDialog QLabel, QMessageBox QLabel {
     color: @TEXT_PRIMARY@; font-size: 13px;
 }
 QInputDialog QLineEdit, QMessageBox QLineEdit {
-    background-color: @BG_INSET@; color: @TEXT_PRIMARY@;
-    border: 1px solid @BORDER@; border-radius: 7px;
-    padding: 8px 10px; font-size: 13px;
+    background-color: @CONTROL_FILL@; color: @TEXT_PRIMARY@;
+    border: 1px solid transparent; border-radius: 11px;
+    padding: 9px 12px; font-size: 13px;
     selection-background-color: @ACCENT@;
 }
 QInputDialog QLineEdit:focus, QMessageBox QLineEdit:focus { border: 1px solid @BORDER_FOCUS@; }
 QInputDialog QPushButton, QMessageBox QPushButton {
-    background-color: @BG_ELEVATED@; color: @TEXT_PRIMARY@;
-    border: 1px solid @BORDER@;
-    border-radius: 7px;
-    padding: 8px 18px; font-size: 12px; font-weight: 600;
+    background-color: @CONTROL_FILL@; color: @TEXT_PRIMARY@;
+    border: 1px solid transparent;
+    border-radius: 11px;
+    padding: 9px 18px; font-size: 12px; font-weight: 600;
     min-width: 64px;
 }
 QInputDialog QPushButton:hover, QMessageBox QPushButton:hover {
-    background-color: @GLASS_HI_STRONG@; border: 1px solid @BORDER_STRONG@;
+    background-color: @GLASS_HI_STRONG@; border: 1px solid transparent;
 }
 QInputDialog QPushButton:default, QMessageBox QPushButton:default {
     background-color: @ACCENT@; color: @TEXT_ON_ACCENT@; border: 1px solid @ACCENT@;
@@ -269,80 +327,64 @@ QDialog {
 QWidget { color: @TEXT_PRIMARY@; }
 
 /* ---- Buttons ---- */
+/* Secondary (default): control-fill, no visible border, 12px radius. */
 QPushButton {
-    background-color: @GLASS_HI@;
+    background-color: @CONTROL_FILL@;
     color: @TEXT_PRIMARY@;
-    border: 1px solid @BORDER@;
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-size: 12px;
+    border: 1px solid transparent;
+    border-radius: 12px;
+    padding: 9px 18px;
+    font-size: 13px;
     font-weight: 600;
 }
-QPushButton:hover {
-    background-color: @GLASS_HI_STRONG@;
-    border: 1px solid @BORDER_STRONG@;
-}
-QPushButton:pressed { background-color: @BG_ELEVATED@; }
+QPushButton:hover { background-color: @GLASS_HI_STRONG@; }
+QPushButton:pressed { background-color: @CONTROL_FILL@; }
 QPushButton:disabled {
     background-color: @BG_INSET@; color: @TEXT_DISABLED@; border: 1px solid transparent;
 }
 
-/* primary: accent */
-QPushButton#btnNew, QPushButton#btnTest {
-    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 @ACCENT_2@, stop:1 @ACCENT@);
-    color: @TEXT_ON_ACCENT@; border: 1px solid @ACCENT@;
-}
-QPushButton#btnNew:hover, QPushButton#btnTest:hover {
-    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 @ACCENT_2@, stop:1 @ACCENT_HOVER@);
-    border: 1px solid @ACCENT_HOVER@;
-}
-QPushButton#btnNew:pressed, QPushButton#btnTest:pressed { background-color: @ACCENT_PRESSED@; }
-
-/* positive: success */
+/* primary CTAs — solid accent blue (New / Test / Run / Save / Play) */
+QPushButton#btnNew, QPushButton#btnTest,
 QPushButton#btnRun, QPushButton#btnSave {
-    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 @SUCCESS_HOVER@, stop:1 @SUCCESS@);
-    color: #ffffff; border: 1px solid @SUCCESS@;
+    background-color: @ACCENT@; color: @TEXT_ON_ACCENT@; border: 1px solid @ACCENT@;
 }
+QPushButton#btnNew:hover, QPushButton#btnTest:hover,
 QPushButton#btnRun:hover, QPushButton#btnSave:hover {
-    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 @SUCCESS_HOVER@, stop:1 @SUCCESS_HOVER@);
-    border: 1px solid @SUCCESS_HOVER@;
+    background-color: @ACCENT_HOVER@; border: 1px solid @ACCENT_HOVER@;
 }
-QPushButton#btnRun:pressed, QPushButton#btnSave:pressed { background-color: @SUCCESS_PRESSED@; }
+QPushButton#btnNew:pressed, QPushButton#btnTest:pressed,
+QPushButton#btnRun:pressed, QPushButton#btnSave:pressed { background-color: @ACCENT_PRESSED@; }
 QPushButton#btnRun:disabled, QPushButton#btnSave:disabled {
     background-color: @BG_INSET@; color: @TEXT_DISABLED@; border: 1px solid transparent;
 }
 
-/* destructive: danger outline */
+/* destructive: soft danger that fills solid on hover */
 QPushButton#btnDelete {
-    background-color: transparent; color: @DANGER@;
-    border: 1px solid rgba(229,72,77,0.30);
+    background-color: @DANGER_SOFT@; color: @DANGER_TEXT@;
+    border: 1px solid transparent;
 }
 QPushButton#btnDelete:hover {
-    background-color: @DANGER_SOFT@; color: #ffffff; border: 1px solid @DANGER@;
+    background-color: @DANGER@; color: #ffffff; border: 1px solid @DANGER@;
 }
 QPushButton#btnDelete:pressed { background-color: @DANGER_PRESSED@; }
 
-/* ghost / icon buttons */
+/* ghost / icon buttons — borderless, muted, control-fill on hover */
 QPushButton#btnEdit, QPushButton#btnSettings,
 QPushButton#btnBack, QPushButton#btnStepDelete, QPushButton#btnExport,
 QPushButton#btnClear, QPushButton#btnCollapse {
     background-color: transparent;
     color: @TEXT_SECONDARY@;
-    border: 1px solid @BORDER@;
+    border: 1px solid transparent;
 }
 QPushButton#btnEdit:hover, QPushButton#btnSettings:hover,
-QPushButton#btnBack:hover, QPushButton#btnStepDelete:hover, QPushButton#btnExport:hover,
+QPushButton#btnBack:hover, QPushButton#btnExport:hover,
 QPushButton#btnClear:hover, QPushButton#btnCollapse:hover {
-    background-color: @GLASS_HI@;
+    background-color: @CONTROL_FILL@;
     color: @TEXT_PRIMARY@;
-    border: 1px solid @BORDER_STRONG@;
+    border: 1px solid transparent;
 }
 QPushButton#btnStepDelete:hover {
-    background-color: @DANGER_SOFT@; color: #ffffff; border: 1px solid @DANGER@;
+    background-color: @DANGER_SOFT@; color: @DANGER_TEXT@; border: 1px solid transparent;
 }
 
 /* Smart Wait toggle — highlights green when active */
@@ -368,7 +410,7 @@ QPushButton#btnSmartWait:disabled {
 QFrame#panelFrame {
     background-color: @BG_SURFACE@;
     border: 1px solid @BORDER@;
-    border-radius: 10px;
+    border-radius: 14px;
 }
 QLabel#panelTitle { color: @TEXT_PRIMARY@; font-size: 12px; font-weight: 700; }
 QLabel#panelHint { color: @TEXT_MUTED@; font-size: 11px; }
@@ -383,15 +425,15 @@ QTextEdit#logView {
     selection-background-color: @ACCENT@;
 }
 QComboBox {
-    background-color: @BG_ELEVATED@;
+    background-color: @CONTROL_FILL@;
     color: @TEXT_PRIMARY@;
-    border: 1px solid @BORDER@;
-    border-radius: 7px;
-    padding: 5px 10px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 6px 10px;
     font-size: 12px;
     min-width: 90px;
 }
-QComboBox:hover { border: 1px solid @BORDER_STRONG@; }
+QComboBox:hover { border: 1px solid @BORDER_FOCUS@; }
 QComboBox::drop-down { border: none; width: 20px; }
 QComboBox::down-arrow {
     image: none;
@@ -426,25 +468,25 @@ QLabel#stepDesc { color: @TEXT_PRIMARY@; font-size: 12px; }
 QLabel#dragHandle { color: @TEXT_DISABLED@; font-size: 16px; }
 QLabel#dragHandle:hover { color: @TEXT_SECONDARY@; }
 
-/* ---- Inputs ---- */
+/* ---- Inputs ---- (filled control-fill, no visible border) */
 QLineEdit {
-    background-color: @BG_INSET@; color: @TEXT_PRIMARY@;
-    border: 1px solid @BORDER@; border-radius: 7px;
-    padding: 7px 10px; font-size: 13px;
+    background-color: @CONTROL_FILL@; color: @TEXT_PRIMARY@;
+    border: 1px solid transparent; border-radius: 11px;
+    padding: 9px 12px; font-size: 13px;
     selection-background-color: @ACCENT@;
 }
-QLineEdit:focus { border: 1px solid @BORDER_FOCUS@; background-color: @BG_INSET@; }
+QLineEdit:focus { border: 1px solid @BORDER_FOCUS@; background-color: @CONTROL_FILL@; }
 QLineEdit#searchBox {
-    border-radius: 9px;
+    border-radius: 12px;
     padding: 10px 12px 10px 34px;
     font-size: 13px;
-    background-color: @BG_SURFACE@;
+    background-color: @CONTROL_FILL@;
 }
 
 QDoubleSpinBox {
-    background-color: @BG_INSET@; color: @TEXT_PRIMARY@;
-    border: 1px solid @BORDER@; border-radius: 7px;
-    padding: 5px 6px; font-size: 12px;
+    background-color: @CONTROL_FILL@; color: @TEXT_PRIMARY@;
+    border: 1px solid transparent; border-radius: 10px;
+    padding: 6px 8px; font-size: 12px;
 }
 QDoubleSpinBox:focus { border: 1px solid @BORDER_FOCUS@; }
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
@@ -456,10 +498,9 @@ QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow { image: none; width: 0; he
 
 /* ---- Workflow rows (cards) ---- */
 QFrame#wfRow {
-    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 @CARD_TOP@, stop:1 @CARD_BOTTOM@);
+    background-color: @BG_SURFACE@;
     border: 1px solid @BORDER@;
-    border-radius: 13px;
+    border-radius: 14px;
 }
 QFrame#wfRow:hover {
     border: 1px solid @BORDER_FOCUS@;
@@ -510,36 +551,41 @@ _OVERLAY_TPL = """
     background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 @OVERLAY_TOP@, stop:1 @OVERLAY_BG@);
     border: 1px solid @BORDER_STRONG@;
-    border-radius: 16px;
+    border-radius: 18px;
 }
 QPushButton {
-    border-radius: 10px;
-    padding: 8px 16px;
-    font-size: 12px;
+    border-radius: 12px;
+    padding: 9px 16px;
+    font-size: 13px;
     font-weight: 600;
     border: 1px solid transparent;
     color: #ffffff;
 }
+/* Record / Stop — red-gradient pill (record identity). */
 QPushButton#btnRecord, QPushButton#btnStop {
-    background-color: @DANGER@; border: 1px solid @DANGER@;
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 @RECORD_GRAD_TOP@, stop:1 @RECORD_GRAD_BOTTOM@);
+    border: 1px solid @RECORD_GRAD_BOTTOM@;
 }
 QPushButton#btnRecord:hover, QPushButton#btnStop:hover {
-    background-color: @DANGER_HOVER@; border: 1px solid @DANGER_HOVER@;
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #ff6d6d, stop:1 #f6536e);
+    border: 1px solid #f6536e;
 }
 QPushButton#btnRecord:pressed, QPushButton#btnStop:pressed {
-    background-color: @DANGER_PRESSED@;
+    background-color: @DANGER_PRESSED@; border: 1px solid @DANGER_PRESSED@;
 }
 QPushButton#btnWorkflows, QPushButton#btnPause {
-    background-color: @GLASS_HI@;
+    background-color: @CONTROL_FILL@;
     color: @TEXT_PRIMARY@;
-    border: 1px solid @BORDER@;
+    border: 1px solid transparent;
 }
 QPushButton#btnWorkflows:hover, QPushButton#btnPause:hover {
     background-color: @GLASS_HI_STRONG@;
     border: 1px solid @BORDER_STRONG@;
 }
 QPushButton#btnWorkflows:pressed, QPushButton#btnPause:pressed {
-    background-color: @GLASS_HI@;
+    background-color: @CONTROL_FILL@;
 }
 """
 

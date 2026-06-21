@@ -56,9 +56,29 @@ def round_corners(hwnd: int) -> None:
     _dwm_set_int(hwnd, _DWMWA_WINDOW_CORNER_PREFERENCE, _DWMWCP_ROUND)
 
 
+# Class-style drop shadow — the subtle shadow Windows draws for menus/popups.
+# This is a safe, single SetClassLong call (no message handling), so it gives a
+# minimal native shadow to frameless windows without the risky WS_THICKFRAME /
+# WM_NCCALCSIZE approach.
+_GCL_STYLE = -26
+_CS_DROPSHADOW = 0x00020000
+
+
+def enable_drop_shadow(hwnd: int) -> None:
+    try:
+        u = ctypes.windll.user32
+        getf = getattr(u, "GetClassLongPtrW", None) or u.GetClassLongW
+        setf = getattr(u, "SetClassLongPtrW", None) or u.SetClassLongW
+        cur = getf(hwnd, _GCL_STYLE)
+        if not (cur & _CS_DROPSHADOW):
+            setf(hwnd, _GCL_STYLE, cur | _CS_DROPSHADOW)
+    except Exception:
+        logger.debug("enable_drop_shadow failed", exc_info=True)
+
+
 def apply_window_chrome(widget, dark: bool, backdrop: int = BACKDROP_NONE) -> None:
-    """Apply theme-matched title bar (+ optional backdrop, rounded corners) to a
-    top-level Qt widget. Safe no-op on failure or when disabled."""
+    """Apply theme-matched title bar, rounded corners, and a minimal native drop
+    shadow to a top-level Qt widget. Safe no-op on failure or when disabled."""
     if not ENABLED:
         return
     try:
@@ -70,6 +90,7 @@ def apply_window_chrome(widget, dark: bool, backdrop: int = BACKDROP_NONE) -> No
     try:
         set_dark_titlebar(hwnd, dark)
         round_corners(hwnd)
+        enable_drop_shadow(hwnd)
         if backdrop != BACKDROP_NONE:
             set_backdrop(hwnd, backdrop)
     except Exception:

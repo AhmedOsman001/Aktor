@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 _PREFS_PATH = DATA_DIR / "theme.json"
 
 DEFAULT_MODE = "dark"
-DEFAULT_ACCENT = "#5e6ad2"
+DEFAULT_ACCENT = "#2563eb"
 
 
 def load() -> dict:

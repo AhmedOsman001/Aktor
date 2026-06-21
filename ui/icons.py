@@ -53,6 +53,7 @@ _STROKE = {
     "chevron_down": '<polyline points="6 9 12 15 18 9"/>',
     "chevron_right": '<polyline points="9 6 15 12 9 18"/>',
     "plus": '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    "minus": '<line x1="5" y1="12" x2="19" y2="12"/>',
     "save": (
         '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>'
         '<polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>'
@@ -96,6 +97,18 @@ _STROKE = {
         '<polyline points="8 7 12 3 16 7"/><polyline points="8 17 12 21 16 17"/>'
         '<line x1="12" y1="3" x2="12" y2="21"/>'
     ),
+    # Sidebar nav marks
+    "library": (
+        '<rect x="3" y="3" width="7" height="7" rx="1.5"/>'
+        '<rect x="14" y="3" width="7" height="7" rx="1.5"/>'
+        '<rect x="3" y="14" width="7" height="7" rx="1.5"/>'
+        '<rect x="14" y="14" width="7" height="7" rx="1.5"/>'
+    ),
+    "activity": (
+        '<line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/>'
+        '<line x1="4" y1="17" x2="14" y2="17"/>'
+    ),
+    "circle": '<circle cx="12" cy="12" r="9"/>',
 }
 
 # Solid/filled glyphs (record dot, stop, pause, play triangle, grip dots).
