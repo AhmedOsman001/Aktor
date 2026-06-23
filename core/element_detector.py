@@ -467,6 +467,77 @@ def _nearest_clickable(root, x: int, y: int, radius: int = 28):
     return best
 
 
+def _same_element(a, b) -> bool:
+    try:
+        ra, rb = a.rectangle, b.rectangle
+        return (
+            ra.left == rb.left and ra.top == rb.top
+            and ra.right == rb.right and ra.bottom == rb.bottom
+            and (_resolve_name(a) or "") == (_resolve_name(b) or "")
+        )
+    except Exception:
+        return False
+
+
+def _find_anchor(element_info, x: int, y: int, radius: int = 320) -> Optional[dict]:
+    """A nearby element with a stable handle to anchor self-healing to.
+
+    Scans the target's siblings (and its grandparent's children) — a small, fast
+    set that usually holds the most stable nearby reference (a field's label, a
+    section header, an adjacent button). Prefers an AutomationId, else a short
+    Name. Returns ``{name, automation_id, control_type, rect:[l,t,r,b], dx, dy}``
+    where (dx, dy) is the click offset from the anchor's *center*, so playback can
+    re-derive the point (find_element returns element centers).
+    """
+    nodes = []
+    try:
+        parent = element_info.parent
+    except Exception:
+        parent = None
+    if parent is not None:
+        nodes.extend(_children(parent))
+        try:
+            gp = parent.parent
+            if gp is not None:
+                nodes.extend(_children(gp))
+        except Exception:
+            pass
+
+    best = None
+    best_score = None
+    for c in nodes:
+        try:
+            if _same_element(c, element_info):
+                continue
+            aid = (_resolve_automation_id(c) or "").strip()
+            nm = (_resolve_name(c) or "").strip()
+            # A usable anchor needs a stable handle: an AutomationId, or a short
+            # human Name (labels/buttons) — not large content blobs.
+            if not aid and not (nm and len(nm) <= 40):
+                continue
+            rect = c.rectangle
+            cx = (rect.left + rect.right) / 2
+            cy = (rect.top + rect.bottom) / 2
+            dist = ((cx - x) ** 2 + (cy - y) ** 2) ** 0.5
+            if dist > radius:
+                continue
+            # Bias toward AutomationId anchors (most stable).
+            score = dist * (0.5 if aid else 1.0)
+            if best_score is None or score < best_score:
+                best_score = score
+                best = {
+                    "name": nm or None,
+                    "automation_id": aid or None,
+                    "control_type": (_resolve_control_type(c) or None),
+                    "rect": [rect.left, rect.top, rect.right, rect.bottom],
+                    "dx": int(x - cx),
+                    "dy": int(y - cy),
+                }
+        except Exception:
+            continue
+    return best
+
+
 def get_element_at(x: int, y: int) -> dict:
     result: dict = {
         "x": x,
@@ -481,6 +552,8 @@ def get_element_at(x: int, y: int) -> dict:
         "window_rect": None,
         "x_relative": None,
         "y_relative": None,
+        "element_rect": None,
+        "anchor": None,
     }
 
     element_info = None
@@ -562,6 +635,23 @@ def get_element_at(x: int, y: int) -> dict:
         result["class_name"] = element_info.class_name or None
     except Exception:
         pass
+
+    # Element bounding rect — a strong, recoverable signal on its own and a
+    # last-resort absolute target for self-healing.
+    try:
+        er = element_info.rectangle
+        if er is not None:
+            result["element_rect"] = (er.left, er.top, er.right, er.bottom)
+    except Exception:
+        pass
+
+    # A nearby element with a stable handle (AutomationId / short Name) + the
+    # click's offset from it — lets playback re-derive the point if the target
+    # itself shifts but a stable neighbour is still findable.
+    try:
+        result["anchor"] = _find_anchor(element_info, x, y)
+    except Exception:
+        logger.debug("anchor capture failed at (%d,%d)", x, y, exc_info=True)
 
     if window_element is not None:
         try:

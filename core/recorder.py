@@ -1,4 +1,5 @@
 import ctypes
+import json
 import logging
 import os
 import queue
@@ -10,13 +11,21 @@ from typing import Callable, Optional
 import psutil
 from pynput import keyboard, mouse
 
-from flowrecord.config import APP_NAME, APP_POLL_INTERVAL_MS, DELAY_THRESHOLD, MAX_DELAY_SECONDS, SYSTEM_PROCESSES
+from flowrecord.config import (
+    APP_NAME, APP_POLL_INTERVAL_MS, DELAY_THRESHOLD,
+    MAX_DELAY_SECONDS, SYSTEM_PROCESSES,
+)
 from flowrecord.core.element_detector import get_element_at, prime_window, reset_a11y_cache
 from flowrecord.models import ActionStep
 
 logger = logging.getLogger(__name__)
 
 _OUR_PID = os.getpid()
+
+# Mouse-movement sampling (only when "Capture mouse movement" is on): at most one
+# move step per interval, and only after the cursor has travelled a few pixels.
+_MOVE_INTERVAL_S = 0.045
+_MOVE_MIN_DIST = 6
 
 _user32 = ctypes.windll.user32
 _user32.GetForegroundWindow.restype = wintypes.HWND
@@ -104,6 +113,10 @@ class Recorder:
         self._on_step_added = on_step_added
         self._last_fg_exe: Optional[str] = None
         self._lock = threading.Lock()
+        # Mouse-movement capture (cursor path between actions) — opt-in.
+        self.capture_moves = False
+        self._last_move_time = 0.0
+        self._last_move_pos: Optional[tuple] = None
         # Double-click detection state.
         self._last_click: Optional[tuple] = None  # (time, x, y, button)
         self._last_click_step: Optional[ActionStep] = None
@@ -150,10 +163,12 @@ class Recorder:
         except Exception:
             pass
 
-        self._mouse_listener = mouse.Listener(
-            on_click=self._on_click,
-            on_scroll=self._on_scroll,
-        )
+        mouse_kwargs = {"on_click": self._on_click, "on_scroll": self._on_scroll}
+        if self.capture_moves:
+            self._last_move_time = 0.0
+            self._last_move_pos = None
+            mouse_kwargs["on_move"] = self._on_move
+        self._mouse_listener = mouse.Listener(**mouse_kwargs)
         self._keyboard_listener = keyboard.Listener(
             on_press=self._on_key_press,
             on_release=self._on_key_release,
@@ -374,6 +389,19 @@ class Recorder:
                 step.parent_path = elem.get("parent_path")
                 step.x_relative = elem.get("x_relative")
                 step.y_relative = elem.get("y_relative")
+
+                # Rich self-heal signals: element bounding rect + a nearby stable
+                # anchor with the click's offset from it.
+                er = elem.get("element_rect")
+                if er:
+                    step.element_rect = ",".join(str(int(v)) for v in er)
+                anchor = elem.get("anchor")
+                if anchor:
+                    try:
+                        step.anchor = json.dumps(anchor, separators=(",", ":"))
+                    except Exception:
+                        pass
+
                 if elem.get("element_name"):
                     step.description = f"{verb} at ({x}, {y}) on '{elem.get('element_name')}'"
                 logger.debug(
@@ -408,6 +436,28 @@ class Recorder:
         target = f" on '{step.element_name}'" if step.element_name else ""
         step.description = f"Double-click at ({step.x}, {step.y}){target}"
         logger.debug("Promoted click to double_click at (%d,%d)%s", step.x, step.y, target)
+        self._notify_step_added()
+
+    def _on_move(self, x: int, y: int) -> None:
+        # Records the cursor path between actions. Throttled by time + distance so
+        # it samples the path instead of flooding with thousands of pixels. Runs
+        # on the input hook thread, so it stays cheap (no element resolution).
+        if not self._recording or self._paused or not self.capture_moves:
+            return
+        if self._text_buffer:  # don't fragment an in-progress type burst
+            return
+        now = time.monotonic()
+        if now - self._last_move_time < _MOVE_INTERVAL_S:
+            return
+        if self._last_move_pos is not None:
+            lx, ly = self._last_move_pos
+            if abs(x - lx) < _MOVE_MIN_DIST and abs(y - ly) < _MOVE_MIN_DIST:
+                return
+        self._last_move_time = now
+        self._last_move_pos = (x, y)
+        step = ActionStep(type="move", x=x, y=y, description=f"Move to ({x}, {y})")
+        with self._lock:
+            self._steps.append(step)
         self._notify_step_added()
 
     def _on_scroll(self, x: int, y: int, dx: int, dy: int) -> None:

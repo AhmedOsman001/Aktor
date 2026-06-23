@@ -19,8 +19,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
-    QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy,
-    QVBoxLayout, QWidget,
+    QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from flowrecord.ui import icons, motion, theme
@@ -137,30 +137,20 @@ class Logo(QWidget):
         s = self._size
         path = QPainterPath()
         path.addRoundedRect(QRectF(0, 0, s, s), s * 0.30, s * 0.30)
-        # Blue gradient squircle (lighter top-left -> accent bottom-right).
+        # Leaf-green gradient squircle (lighter top-left -> accent bottom-right).
         acc = theme.manager.color("ACCENT")
         grad = QLinearGradient(0, 0, s, s)
-        grad.setColorAt(0.0, acc.lighter(128))
+        grad.setColorAt(0.0, acc.lighter(122))
         grad.setColorAt(1.0, acc)
         p.fillPath(path, QBrush(grad))
 
-        cx, cy = s / 2, s / 2
-        white = QColor("#ffffff")
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(white)
-        r_dot = s * 0.085
-        p.drawEllipse(QPointF(cx, cy), r_dot, r_dot)
-
-        pen = QPen(white)
-        pen.setWidthF(max(1.4, s * 0.055))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        for frac in (0.22, 0.34):
-            rr = s * frac
-            rect = QRectF(cx - rr, cy - rr, rr * 2, rr * 2)
-            p.drawArc(rect, int(-50 * 16), int(100 * 16))
-            p.drawArc(rect, int(130 * 16), int(100 * 16))
+        # A white leaf with green veins — the nature signature. Side veins only
+        # at larger sizes so the small title-bar mark stays crisp.
+        icons.draw_leaf(
+            p, s / 2, s / 2, length=s * 0.62,
+            fill=QColor("#ffffff"), vein=acc.darker(108),
+            detail=s >= 40, vein_w=max(1.2, s * 0.05),
+        )
         p.end()
 
 
@@ -727,6 +717,39 @@ class InsetList(QFrame):
 # ===========================================================================
 # RecordingCard — grid + list variants
 # ===========================================================================
+class SmoothScrollArea(QScrollArea):
+    """A QScrollArea with eased, animated wheel scrolling. Wheel notches
+    accumulate into one in-flight animation so fast scrolling stays fluid
+    instead of jumping line-by-line."""
+
+    _STEP = 1.0        # px of scroll per unit of wheel angle-delta
+    _DURATION = 190    # ms per eased glide — short so it stays responsive
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._anim = QPropertyAnimation(self.verticalScrollBar(), b"value", self)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.setDuration(self._DURATION)
+        self._target: Optional[int] = None
+
+    def wheelEvent(self, e):
+        sb = self.verticalScrollBar()
+        if sb is None or sb.maximum() == sb.minimum():
+            return super().wheelEvent(e)
+        dy = e.angleDelta().y()
+        if dy == 0:
+            return super().wheelEvent(e)
+        running = self._anim.state() == QPropertyAnimation.State.Running
+        base = self._target if (running and self._target is not None) else sb.value()
+        target = max(sb.minimum(), min(sb.maximum(), int(base - dy * self._STEP)))
+        self._target = target
+        self._anim.stop()
+        self._anim.setStartValue(sb.value())
+        self._anim.setEndValue(target)
+        self._anim.start()
+        e.accept()
+
+
 class RecordingCard(QFrame):
     play_clicked = Signal(int)
     menu_clicked = Signal(int)
@@ -744,7 +767,7 @@ class RecordingCard(QFrame):
         self._rest_geom: QRect | None = None
         self._hovered = False
         self._geo_anim = QPropertyAnimation(self, b"geometry", self)
-        self._geo_anim.setDuration(150)
+        self._geo_anim.setDuration(200)
         self._geo_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         if variant == "grid":
             self._build_grid()
@@ -846,8 +869,8 @@ class RecordingCard(QFrame):
         self._shadow.setOffset(0, dy)
 
     def _grown(self, rect: QRect) -> QRect:
-        gw = int(rect.width() * 0.035)
-        gh = int(rect.height() * 0.035)
+        gw = int(rect.width() * 0.06)
+        gh = int(rect.height() * 0.06)
         return QRect(rect.x() - gw // 2, rect.y() - gh // 2,
                      rect.width() + gw, rect.height() + gh)
 
@@ -868,22 +891,25 @@ class RecordingCard(QFrame):
         self._hovered = True
         if self._rest_geom is None:
             self._rest_geom = self.geometry()
-        self.raise_()
-        self._animate_geo(self._grown(self._rest_geom))
+        # Only grid cards scale up — full-width list rows would overflow the
+        # frame, so they get the shadow lift alone.
+        if self._variant == "grid":
+            self.raise_()
+            self._animate_geo(self._grown(self._rest_geom))
         color, blur, dy = self._shadow_hover()
         self._shadow.setColor(color)
-        motion.animate_blur(self._shadow, blur, 180)
-        motion.animate_offset(self._shadow, dy, 180)
+        motion.animate_blur(self._shadow, blur, 200)
+        motion.animate_offset(self._shadow, dy, 200)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
         self._hovered = False
-        if self._rest_geom is not None:
+        if self._variant == "grid" and self._rest_geom is not None:
             self._animate_geo(self._rest_geom)
         color, blur, dy = self._shadow_rest()
         self._shadow.setColor(color)
-        motion.animate_blur(self._shadow, blur, 200)
-        motion.animate_offset(self._shadow, dy, 200)
+        motion.animate_blur(self._shadow, blur, 240)
+        motion.animate_offset(self._shadow, dy, 240)
         super().leaveEvent(e)
 
     def _apply(self) -> None:

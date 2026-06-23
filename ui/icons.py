@@ -12,8 +12,8 @@ Usage::
     btn.setIcon(icons.icon("trash", color=theme.manager.color("DANGER").name()))
 """
 
-from PySide6.QtCore import QByteArray, QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 from flowrecord.ui import theme
@@ -109,6 +109,16 @@ _STROKE = {
         '<line x1="4" y1="17" x2="14" y2="17"/>'
     ),
     "circle": '<circle cx="12" cy="12" r="9"/>',
+    # Botanical marks (nature theme)
+    "leaf": (
+        '<path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 '
+        '0 5.5-4.78 10-10 10Z"/>'
+        '<path d="M2 21c0-3 1.85-5.36 5.08-6"/>'
+    ),
+    "sprout": (
+        '<path d="M7 20h10"/><path d="M12 20c0-6-1.5-9-7-9 0 5 2 8 7 9z"/>'
+        '<path d="M12 20c0-7 2-10 7-10 0 5-2 9-7 10z"/>'
+    ),
 }
 
 # Solid/filled glyphs (record dot, stop, pause, play triangle, grip dots).
@@ -177,9 +187,59 @@ def icon(name: str, color: str | None = None, size: int = 18, width: float = 2.0
     return QIcon(pixmap(name, color, size, width))
 
 
+def draw_leaf(
+    p: QPainter,
+    cx: float,
+    cy: float,
+    length: float,
+    *,
+    fill: QColor,
+    vein: QColor,
+    tilt: float = -38.0,
+    detail: bool = True,
+    vein_w: float = 2.0,
+) -> None:
+    """Paint a leaf (pointed-oval body + midrib, optionally pinnate side veins).
+
+    Centered on ``(cx, cy)``, ``length`` tip-to-tip, rotated ``tilt`` degrees so
+    it sits on a natural diagonal. Shared by the app/tray mark and the Logo
+    widget so the botanical signature is identical everywhere.
+    """
+    from PySide6.QtGui import QPen
+
+    p.save()
+    p.translate(cx, cy)
+    p.rotate(tilt)
+    half = length / 2.0
+    w = length * 0.34  # half-width
+
+    body = QPainterPath()
+    body.moveTo(0.0, -half)
+    body.quadTo(w, 0.0, 0.0, half)
+    body.quadTo(-w, 0.0, 0.0, -half)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(fill)
+    p.drawPath(body)
+
+    pen = QPen(vein, vein_w)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    # Midrib.
+    p.drawLine(QPointF(0.0, -half * 0.80), QPointF(0.0, half * 0.86))
+    # Pinnate side veins branching up-and-out from the midrib.
+    if detail:
+        for fy in (0.42, 0.08, -0.26):
+            y = fy * half
+            reach = w * (0.46 + 0.18 * (1.0 - abs(fy)))
+            p.drawLine(QPointF(0.0, y), QPointF(reach, y - length * 0.15))
+            p.drawLine(QPointF(0.0, y), QPointF(-reach, y - length * 0.15))
+    p.restore()
+
+
 def app_icon(size: int = 32) -> QIcon:
-    """The FlowRecord app/tray mark: an accent rounded-square badge with a flow
-    glyph. Uses the active accent so it matches the chosen theme."""
+    """The app/tray mark: an accent rounded-square badge with a white leaf. Uses
+    the active accent so it matches the chosen theme."""
     accent = theme.manager.color("ACCENT")
     accent2 = theme.manager.color("ACCENT_HOVER")
 
@@ -190,11 +250,10 @@ def app_icon(size: int = 32) -> QIcon:
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    from PySide6.QtCore import QPointF
-    from PySide6.QtGui import QLinearGradient, QPen
+    from PySide6.QtGui import QLinearGradient
 
     grad = QLinearGradient(0, 0, px, px)
-    grad.setColorAt(0.0, accent2)
+    grad.setColorAt(0.0, accent.lighter(118))
     grad.setColorAt(1.0, accent)
     p.setBrush(grad)
     p.setPen(Qt.PenStyle.NoPen)
@@ -202,25 +261,15 @@ def app_icon(size: int = 32) -> QIcon:
     radius = px * 0.26
     p.drawRoundedRect(QRectF(pad, pad, px - 2 * pad, px - 2 * pad), radius, radius)
 
-    # A stylized "flow" mark: a play-like chevron pair.
-    pen = QPen(QColor(255, 255, 255), px * 0.085)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    w, h = px, px
-    p.drawPolyline(_poly([(0.34, 0.34), (0.5, 0.5), (0.34, 0.66)], w, h))
-    p.drawPolyline(_poly([(0.54, 0.34), (0.70, 0.5), (0.54, 0.66)], w, h))
+    draw_leaf(
+        p, px / 2, px / 2, length=px * 0.62,
+        fill=QColor("#ffffff"), vein=accent.darker(108),
+        detail=True, vein_w=px * 0.03,
+    )
     p.end()
 
     pm.setDevicePixelRatio(float(scale))
     return QIcon(pm)
-
-
-def _poly(points, w, h):
-    from PySide6.QtCore import QPointF
-    from PySide6.QtGui import QPolygonF
-    return QPolygonF([QPointF(x * w, y * h) for x, y in points])
 
 
 def clear_cache() -> None:

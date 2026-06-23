@@ -14,6 +14,10 @@ class ActionStep:
     automation_id: Optional[str] = None
     class_name: Optional[str] = None
     parent_path: Optional[str] = None
+    # Rich match signals captured at click time, so playback can self-heal toward
+    # multiple cues instead of a single (x, y) or selector.
+    element_rect: Optional[str] = None   # "l,t,r,b" screen rect of the element
+    anchor: Optional[str] = None         # JSON: nearby stable anchor + click offset
     x: Optional[int] = None
     y: Optional[int] = None
     x_relative: Optional[float] = None

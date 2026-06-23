@@ -69,6 +69,7 @@ _DEFAULT_APP_PREFS = {
     "capture_moves": False,
     "capture_delays": True,
     "minimize_on_record": True,
+    "overlay_side": "left",
     "record_hotkey": DEFAULT_RECORD_HOTKEY,
     "stop_hotkey": "esc",
     "showhide_hotkey": "ctrl+shift+a",
@@ -167,9 +168,13 @@ class FlowRecordApp:
         self._recorder = Recorder(on_step_added=self._on_step_added)
         self._player = Player(on_step_complete=self._on_playback_step)
         self._overlay = OverlayController()
+        self._overlay.set_side(self._app_prefs.get("overlay_side", "left"))
         self._wf_dialog: WorkflowManagerWindow | None = None
         self._play_remaining = 0
         self._play_loop = False
+        # True while we close the manager ourselves (record/new), so the close
+        # isn't mistaken for the user quitting via the window's X button.
+        self._programmatic_close = False
 
         # Smart Wait status -> overlay (called from the playback thread).
         self._player.on_smart_wait_progress = (
@@ -314,6 +319,7 @@ class FlowRecordApp:
         self._overlay.show()
         self._overlay.set_state(OverlayState.RECORDING)
         self._overlay.set_step_count(0)
+        self._recorder.capture_moves = self._app_prefs.get("capture_moves", False)
         self._recorder.start()
 
     def _stop(self):
@@ -414,6 +420,7 @@ class FlowRecordApp:
             "capture_moves": g("capture_moves", False),
             "capture_delays": g("capture_delays", True),
             "minimize_on_record": g("minimize_on_record", True),
+            "overlay_side": g("overlay_side", "left"),
             "record_hotkey": self._record_hotkey(),
             "stop_hotkey": g("stop_hotkey", "esc"),
             "showhide_hotkey": g("showhide_hotkey", "ctrl+shift+a"),
@@ -445,6 +452,8 @@ class FlowRecordApp:
             self._tray.setToolTip(f"{APP_NAME}\n{self._record_hotkey()} to record")
         elif key == "launch_at_startup":
             _set_startup(bool(value))
+        elif key == "overlay_side":
+            self._overlay.set_side(value)
         # capture_moves / capture_delays / minimize_on_record / minimize_to_tray
         # are read from prefs when needed (record start/stop, window close).
         logger.info("Setting changed: %s = %s", key, value)
@@ -455,10 +464,22 @@ class FlowRecordApp:
 
     def _on_wf_dialog_closed(self):
         self._wf_dialog = None
+        # "Minimize to system tray" off -> the X button quits the app (unless
+        # we closed it ourselves, or something is actively running).
+        if (not self._programmatic_close
+                and not self._app_prefs.get("minimize_to_tray", True)
+                and not self._recorder.recording
+                and not self._player.playing):
+            logger.info("Minimize-to-tray is off — quitting on window close")
+            self._quit()
 
     def _close_wf_dialog(self):
         if self._wf_dialog is not None:
-            self._wf_dialog.close()
+            self._programmatic_close = True
+            try:
+                self._wf_dialog.close()
+            finally:
+                self._programmatic_close = False
             self._wf_dialog = None
 
     def _play_by_id(self, wf_id: int, speed: float = 1.0, repeat: int = 1,

@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS steps (
     automation_id TEXT,
     class_name TEXT,
     parent_path TEXT,
+    element_rect TEXT,
+    anchor TEXT,
     FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 )
 """
@@ -72,6 +74,7 @@ def init_db(db_path: Optional[Path] = None) -> None:
         _migrate_smart_wait(conn)
         _migrate_element_attrs(conn)
         _migrate_favorite(conn)
+        _migrate_match_signals(conn)
         logger.debug("init_db: tables ready at %s", db_path or DB_PATH)
     finally:
         conn.close()
@@ -108,6 +111,21 @@ def _migrate_favorite(conn: sqlite3.Connection) -> None:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(workflows)").fetchall()]
         if "favorite" not in cols:
             conn.execute("ALTER TABLE workflows ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+    except Exception:
+        pass
+
+
+def _migrate_match_signals(conn: sqlite3.Connection) -> None:
+    """Add self-heal signal columns (element_rect / anchor)."""
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(steps)").fetchall()]
+        added = False
+        for col in ("element_rect", "anchor"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE steps ADD COLUMN {col} TEXT")
+                added = True
+        if added:
             conn.commit()
     except Exception:
         pass
@@ -183,8 +201,9 @@ def _insert_step(conn: sqlite3.Connection, workflow_id: int, order: int, step: A
         "element_name, element_type, automation_id, class_name, parent_path, "
         "x, y, x_relative, y_relative, keys, text, "
         "scroll_dx, scroll_dy, delay_after, description, enabled, "
-        "smart_wait_enabled, smart_wait_timeout, smart_wait_on_timeout) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "smart_wait_enabled, smart_wait_timeout, smart_wait_on_timeout, "
+        "element_rect, anchor) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             workflow_id,
             order,
@@ -210,6 +229,8 @@ def _insert_step(conn: sqlite3.Connection, workflow_id: int, order: int, step: A
             1 if step.smart_wait_enabled else 0,
             step.smart_wait_timeout,
             step.smart_wait_on_timeout,
+            step.element_rect,
+            step.anchor,
         ),
     )
 
@@ -358,6 +379,8 @@ def _row_to_step(row: sqlite3.Row) -> ActionStep:
     automation_id = row["automation_id"] if "automation_id" in keys else None
     class_name = row["class_name"] if "class_name" in keys else None
     parent_path = row["parent_path"] if "parent_path" in keys else None
+    element_rect = row["element_rect"] if "element_rect" in keys else None
+    anchor = row["anchor"] if "anchor" in keys else None
     return ActionStep(
         id=row["id"],
         type=row["type"],
@@ -368,6 +391,8 @@ def _row_to_step(row: sqlite3.Row) -> ActionStep:
         automation_id=automation_id,
         class_name=class_name,
         parent_path=parent_path,
+        element_rect=element_rect,
+        anchor=anchor,
         x=row["x"],
         y=row["y"],
         x_relative=row["x_relative"],

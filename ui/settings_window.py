@@ -76,6 +76,16 @@ class SettingsWindow(QWidget):
             lambda i: self.theme_mode_changed.emit(_THEME_MODES[i])
         )
         general.add_row("Theme", self._theme_seg)
+
+        side = self._prefs.get("overlay_side", "left")
+        self._side_seg = SegmentedControl(["Left", "Right"], index=(1 if side == "right" else 0))
+        self._side_seg.changed.connect(
+            lambda i: self.pref_changed.emit("overlay_side", "right" if i == 1 else "left")
+        )
+        general.add_row(
+            "Overlay position", self._side_seg,
+            subtitle="Dock the control bar to the left or right edge",
+        )
         root.addWidget(general)
 
         # ---- RECORDING ----

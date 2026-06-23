@@ -1,4 +1,6 @@
 import logging
+import math
+import time
 from enum import Enum
 from typing import Optional
 
@@ -16,11 +18,12 @@ from PySide6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
 )
-from PySide6.QtGui import QColor, QPainter, QCursor, QPen
+from PySide6.QtGui import QColor, QPainter, QCursor, QPen, QLinearGradient, QImage
 from PySide6.QtWidgets import (
     QApplication,
     QWidget,
     QHBoxLayout,
+    QVBoxLayout,
     QPushButton,
     QLabel,
     QFrame,
@@ -32,13 +35,18 @@ from flowrecord.ui import theme, icons, motion
 
 logger = logging.getLogger(__name__)
 
-# Pill metrics (the visible rounded surface)
-PILL_WIDTH = 320
-PILL_HEIGHT = 52
-_SHADOW_PAD = 22  # space around the pill so the drop shadow is not clipped
+# Vertical dock metrics — a slim bar tucked against the left screen edge.
+BAR_WIDTH = 56            # visible frame width
+BAR_HEIGHT = 190          # visible frame height (content is centered within)
+_SHADOW_PAD = 22          # room around the frame so the drop shadow isn't clipped
 
-OVERLAY_WIDTH = PILL_WIDTH + _SHADOW_PAD * 2
-OVERLAY_HEIGHT = PILL_HEIGHT + _SHADOW_PAD * 2
+OVERLAY_WIDTH = BAR_WIDTH + _SHADOW_PAD * 2
+OVERLAY_HEIGHT = BAR_HEIGHT + _SHADOW_PAD * 2
+
+_EDGE_GAP = 8             # gap from the screen edge when revealed (out)
+_PEEK = 6                 # thin sliver left visible when hidden at rest
+_REVEAL_TRIGGER = 10      # how close to the edge the cursor must be to reveal
+_REVEAL_HOLD_MS = 1500    # stay revealed this long after show / a state change
 
 BORDER_FLASH_MS = 280
 BORDER_FLASH_COUNT = 3
@@ -160,7 +168,150 @@ class _BorderFlash(QWidget):
         p.end()
 
 
+class _PlaybackGlow(QWidget):
+    """A soft, breathing multi-hue glow around the screen edges shown while a
+    workflow replays — ambient feedback like Siri / Google Assistant.
+
+    The window is full-screen, translucent, always-on-top and **click-through**
+    (``WindowTransparentForInput`` + ``WA_TransparentForMouseEvents``) so it can
+    never intercept the mouse/keyboard the player is driving. Hues flow around
+    the perimeter and the whole thing breathes; it fades in/out smoothly.
+    """
+
+    DEPTH = 150        # how far the glow reaches inward from each edge (px)
+    _FPS_MS = 8        # ~120 fps
+
+    def __init__(self):
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setStyleSheet("background: transparent;")
+        self._phase = 0.0
+        self._intensity = 0.0      # eased 0..1 envelope
+        self._target = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._FPS_MS)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        screen = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen)
+        self._target = 1.0
+        self.show()
+        self.raise_()
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self):
+        # Fade out, then hide in _tick once the envelope reaches ~0.
+        self._target = 0.0
+
+    def _tick(self):
+        self._phase += 0.006                                  # scaled for 120 fps
+        self._intensity += (self._target - self._intensity) * 0.035
+
+        if self._target == 0.0 and self._intensity < 0.02:
+            self._intensity = 0.0
+            self._timer.stop()
+            self.hide()
+            return
+        self.update()
+
+    def _flow_gradient(self, x0, y0, x1, y1,
+                       perim_start: float, edge_len: float, perim: float) -> QLinearGradient:
+        """Colour running ALONG an edge: one coherent leaf-green whose brightness
+        follows a smooth sine wave travelling continuously around the whole
+        perimeter — light flowing, not the hue changing randomly."""
+        acc = theme.manager.color("ACCENT")
+        hh, s, vv, _ = acc.getHsv()
+        g = QLinearGradient(x0, y0, x1, y1)
+        steps = 20                 # many stops -> a smooth wave, no banding
+        cycles = 3.0               # bright crests around the perimeter
+        speed = 0.22               # how fast the wave travels
+        for k in range(steps + 1):
+            f = k / steps
+            pf = (perim_start + f * edge_len) / perim
+            wave = 0.5 + 0.5 * math.sin(2 * math.pi * (pf * cycles - self._phase * speed))
+            hue = (hh - 10 * wave) % 360                      # stays green; only a hair lighter at crests
+            sat = max(150, min(255, s + 20))
+            val = min(255, vv + int(75 * wave))
+            alpha = int((0.45 + 0.55 * wave) * 255)           # never fully dark; crests pop
+            g.setColorAt(f, QColor.fromHsv(int(hue), sat, val, alpha))
+        return g
+
+    def _mask(self, x0, y0, x1, y1) -> QLinearGradient:
+        """A white→transparent alpha mask running from the outer edge inward,
+        with a soft (non-linear) falloff so the glow melts away smoothly."""
+        g = QLinearGradient(x0, y0, x1, y1)
+        g.setColorAt(0.0, QColor(255, 255, 255, 255))
+        g.setColorAt(0.40, QColor(255, 255, 255, 160))
+        g.setColorAt(0.72, QColor(255, 255, 255, 45))
+        g.setColorAt(1.0, QColor(255, 255, 255, 0))
+        return g
+
+    def _band_image(self, iw: int, ih: int, flow, mask) -> QImage:
+        """One smoothly-faded edge band: the flowing colour multiplied by the
+        perpendicular alpha mask. A single continuous gradient — no strips, no
+        seams."""
+        img = QImage(iw, ih, QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        ip = QPainter(img)
+        ip.setPen(Qt.PenStyle.NoPen)
+        ip.fillRect(0, 0, iw, ih, flow)
+        ip.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        ip.fillRect(0, 0, iw, ih, mask)
+        ip.end()
+        return img
+
+    def paintEvent(self, event):
+        if self._intensity <= 0.01:
+            return
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            p.end()
+            return
+        breathe = 0.86 + 0.14 * math.sin(self._phase * 1.6)
+        d = int(min(self.DEPTH, w // 2, h // 2))
+        per = 2.0 * (w + h)
+
+        # Each edge: a coherent green band, faded inward by a smooth mask. The
+        # along-edge gradients run in the perimeter direction (top→right→bottom→
+        # left) so the brightness wave circulates seamlessly around the screen.
+        top = self._band_image(w, d, self._flow_gradient(0, 0, w, 0, 0.0, w, per),
+                               self._mask(0, 0, 0, d))
+        right = self._band_image(d, h, self._flow_gradient(0, 0, 0, h, w, h, per),
+                                 self._mask(d, 0, 0, 0))
+        bottom = self._band_image(w, d, self._flow_gradient(w, 0, 0, 0, w + h, w, per),
+                                  self._mask(0, d, 0, 0))
+        left = self._band_image(d, h, self._flow_gradient(0, h, 0, 0, 2 * w + h, h, per),
+                                self._mask(0, 0, d, 0))
+
+        p.setOpacity(min(1.0, self._intensity * breathe * 0.82))
+        p.drawImage(0, 0, top)
+        p.drawImage(w - d, 0, right)
+        p.drawImage(0, h - d, bottom)
+        p.drawImage(0, 0, left)
+        p.setOpacity(1.0)
+        p.end()
+
+
 class _OverlayBar(QWidget):
+    """A slim vertical control dock pinned to the left screen edge.
+
+    Buttons are icon-only and stacked vertically. The bar tucks itself to the
+    edge when idle (leaving a small sliver) and slides out when the cursor
+    approaches or whenever it has something to show (recording / playing /
+    smart-waiting). All position changes are animated.
+    """
+
     record_clicked = Signal()
     stop_clicked = Signal()
     pause_clicked = Signal()
@@ -174,9 +325,8 @@ class _OverlayBar(QWidget):
             | Qt.WindowType.Tool,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(OVERLAY_WIDTH, OVERLAY_HEIGHT)
+        self.setFixedWidth(OVERLAY_WIDTH)   # height is sized to the content per state
         self.setWindowOpacity(_TARGET_OPACITY)
-        self._drag_pos: Optional[QPoint] = None
 
         self._main_layout = QHBoxLayout(self)
         self._main_layout.setContentsMargins(
@@ -187,50 +337,38 @@ class _OverlayBar(QWidget):
         self._frame = QFrame()
         self._frame.setObjectName("pillFrame")
 
-        # Elevation / glow (color shifts per state — see _apply_state_glow)
+        # Elevation / glow (color shifts per state — see _apply_state_glow). The
+        # bar sits on the left edge, so the shadow is cast to the right.
         self._shadow = QGraphicsDropShadowEffect(self._frame)
         self._shadow.setBlurRadius(28)
         self._shadow.setColor(QColor(0, 0, 0, 180))
-        self._shadow.setOffset(0, 9)
+        self._shadow.setOffset(5, 0)
         self._frame.setGraphicsEffect(self._shadow)
         self._state = OverlayState.IDLE
         self._paused_state = False
 
-        self._inner_layout = QHBoxLayout(self._frame)
-        self._inner_layout.setContentsMargins(12, 7, 12, 7)
-        self._inner_layout.setSpacing(8)
+        self._inner_layout = QVBoxLayout(self._frame)
+        self._inner_layout.setContentsMargins(8, 12, 8, 12)
+        self._inner_layout.setSpacing(10)
 
-        self._btn_record = QPushButton("Record")
-        self._btn_record.setObjectName("btnRecord")
-        self._btn_record.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-
-        self._btn_stop = QPushButton("Stop")
-        self._btn_stop.setObjectName("btnStop")
-        self._btn_stop.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-
-        self._btn_pause = QPushButton("Pause")
-        self._btn_pause.setObjectName("btnPause")
-        self._btn_pause.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-
-        self._btn_workflows = QPushButton("Workflows")
-        self._btn_workflows.setObjectName("btnWorkflows")
-        self._btn_workflows.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._btn_record = self._make_button("btnRecord", "Record")
+        self._btn_stop = self._make_button("btnStop", "Stop")
+        self._btn_pause = self._make_button("btnPause", "Pause")
+        self._btn_workflows = self._make_button("btnWorkflows", "Workflows")
 
         self._dot = _RecordDot()
         self._sep = QFrame()
-        self._sep.setFixedHeight(18)
-        self._sep.setFixedWidth(1)
+        self._sep.setFixedHeight(1)
+        self._sep.setFixedWidth(30)
 
-        self._step_label = QLabel("")
-        self._progress_label = QLabel("")
-
-        # Smart Wait state: a status label + a thin progress bar.
-        self._smart_wait_label = QLabel("")
+        self._step_label = self._make_label()
+        self._progress_label = self._make_label()
+        self._smart_wait_label = self._make_label()
 
         self._smart_wait_bar = QProgressBar()
         self._smart_wait_bar.setTextVisible(False)
         self._smart_wait_bar.setFixedHeight(6)
-        self._smart_wait_bar.setFixedWidth(90)
+        self._smart_wait_bar.setFixedWidth(40)
         self._smart_wait_bar.setRange(0, 100)
         self._smart_wait_bar.setValue(0)
 
@@ -241,16 +379,145 @@ class _OverlayBar(QWidget):
 
         self._main_layout.addWidget(self._frame)
 
-        self._set_idle_layout()
+        # Dock state (set before the first layout so geometry helpers resolve).
+        self._side = "left"       # "left" | "right" screen edge
+        self._docked_out = False  # False = hidden at edge, True = revealed
+        self._dock_anim: Optional[QPropertyAnimation] = None
+        self._reveal_until = 0.0
 
-        screen = QApplication.primaryScreen().geometry()
-        self.move(
-            (screen.width() - OVERLAY_WIDTH) // 2,
-            screen.bottom() - OVERLAY_HEIGHT - 36,
-        )
+        self._set_idle_layout()
+        self._fit()   # size to content + position at the docked edge
+
+        # Poll the cursor (kept for future auto-hide; currently always docked out).
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setInterval(140)
+        self._hover_timer.timeout.connect(self._update_dock)
 
         self._apply_theme()
         theme.manager.changed.connect(self._apply_theme)
+
+    # ---- builders ----
+    def _make_button(self, obj_name: str, tip: str) -> QPushButton:
+        b = QPushButton()
+        b.setObjectName(obj_name)
+        b.setToolTip(tip)
+        b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        b.setFixedSize(40, 40)
+        b.setIconSize(QSize(18, 18))
+        return b
+
+    def _make_label(self) -> QLabel:
+        lab = QLabel("")
+        lab.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        lab.setFixedWidth(BAR_WIDTH - 16)
+        return lab
+
+    # ---- geometry / docking ----
+    def _screen(self) -> QRect:
+        return QApplication.primaryScreen().geometry()
+
+    def _is_right(self) -> bool:
+        return self._side == "right"
+
+    def _screen_right(self) -> int:
+        sc = self._screen()
+        return sc.left() + sc.width()
+
+    def _center_y(self) -> int:
+        sc = self._screen()
+        return sc.top() + (sc.height() - self.height()) // 2
+
+    def _fit(self) -> None:
+        """Size the window to the current content and place it at the position
+        matching the current dock state (rest vs out). Called after every layout
+        rebuild."""
+        self._inner_layout.activate()
+        self.setFixedHeight(self._frame.sizeHint().height() + 2 * _SHADOW_PAD)
+        target = self._out_x() if self._docked_out else self._rest_x()
+        self.move(target, self._center_y())
+
+    def _rest_x(self) -> int:
+        """Hidden at the edge — only a thin _PEEK sliver pokes onto the screen."""
+        if self._is_right():
+            return self._screen_right() - _PEEK - _SHADOW_PAD
+        return self._screen().left() + _PEEK - BAR_WIDTH - _SHADOW_PAD
+
+    def _out_x(self) -> int:
+        """Fully revealed, a small gap from the edge."""
+        if self._is_right():
+            return self._screen_right() - _EDGE_GAP - BAR_WIDTH - _SHADOW_PAD
+        return self._screen().left() + _EDGE_GAP - _SHADOW_PAD
+
+    def _offscreen_x(self) -> int:
+        """Fully off the edge — the entrance slide-in start point."""
+        if self._is_right():
+            return self._screen_right() + _SHADOW_PAD
+        return self._screen().left() - BAR_WIDTH - _SHADOW_PAD
+
+    def _out_frame_rect(self) -> QRect:
+        """The frame rect at the revealed position — used for the hover zone."""
+        h = self.height() - 2 * _SHADOW_PAD
+        return QRect(self._out_x() + _SHADOW_PAD, self._center_y() + _SHADOW_PAD,
+                     BAR_WIDTH, h)
+
+    def _hovering(self) -> bool:
+        r = self._out_frame_rect()
+        sc = self._screen()
+        top = r.top() - 14
+        height = r.height() + 28
+        if self._docked_out:
+            # Already revealed: stay out while the cursor is over the bar (+ a
+            # small margin) so it doesn't flicker shut.
+            if self._is_right():
+                x0 = r.left() - 10
+                zone = QRect(x0, top, self._screen_right() - x0, height)
+            else:
+                zone = QRect(sc.left(), top, (r.right() + 10) - sc.left(), height)
+        else:
+            # Hidden: a thin but full-height strip along the edge, so the bar
+            # reveals whenever the cursor reaches that side of the screen.
+            if self._is_right():
+                zone = QRect(self._screen_right() - _REVEAL_TRIGGER, sc.top(),
+                             _REVEAL_TRIGGER, sc.height())
+            else:
+                zone = QRect(sc.left(), sc.top(), _REVEAL_TRIGGER, sc.height())
+        return zone.contains(QCursor.pos())
+
+    def set_side(self, side: str) -> None:
+        """Dock the bar to the 'left' or 'right' screen edge."""
+        side = "right" if side == "right" else "left"
+        self._side = side
+        self.move((self._out_x() if self._docked_out else self._rest_x()),
+                  self._center_y())
+        self._apply_state_glow(self._state)
+
+    def _hold_revealed(self):
+        self._reveal_until = time.monotonic() + _REVEAL_HOLD_MS / 1000.0
+
+    def _want_out(self) -> bool:
+        # Reveal while active (recording/playing/waiting), briefly after a change,
+        # or when hovered; otherwise hide at the edge.
+        if self._state != OverlayState.IDLE:
+            return True
+        if time.monotonic() < self._reveal_until:
+            return True
+        return self._hovering()
+
+    def _update_dock(self):
+        want = self._want_out()
+        if want == self._docked_out:
+            return
+        self._docked_out = want
+        self._slide_x(self._out_x() if want else self._rest_x())
+
+    def _slide_x(self, target_x: int):
+        anim = QPropertyAnimation(self, b"pos", self)
+        anim.setDuration(240)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setStartValue(self.pos())
+        anim.setEndValue(QPoint(target_x, self._center_y()))
+        anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._dock_anim = anim
 
     # ---- theming ----
     def _apply_theme(self):
@@ -260,21 +527,19 @@ class _OverlayBar(QWidget):
         # Vector icons (retinted for the active theme).
         white = "#ffffff"
         prim = toks["TEXT_PRIMARY"]
-        for btn in (self._btn_record, self._btn_stop, self._btn_pause, self._btn_workflows):
-            btn.setIconSize(QSize(15, 15))
-        self._btn_record.setIcon(icons.icon("record", white, 14))
-        self._btn_stop.setIcon(icons.icon("stop", white, 14))
-        self._btn_workflows.setIcon(icons.icon("workflows", prim, 16))
+        self._btn_record.setIcon(icons.icon("record", white, 16))
+        self._btn_stop.setIcon(icons.icon("stop", white, 16))
+        self._btn_workflows.setIcon(icons.icon("workflows", prim, 18))
         self.set_paused(self._paused_state)
         self._sep.setStyleSheet(
             f"background-color: {toks['GLASS_HI_STRONG']}; border: none;"
         )
         label_css = (
-            f"color: {toks['TEXT_SECONDARY']}; font-size: 12px; font-weight: 600;"
+            f"color: {toks['TEXT_SECONDARY']}; font-size: 11px; "
+            f"font-weight: 700; background: transparent;"
         )
-        self._step_label.setStyleSheet(label_css)
-        self._progress_label.setStyleSheet(label_css)
-        self._smart_wait_label.setStyleSheet(label_css)
+        for lab in (self._step_label, self._progress_label, self._smart_wait_label):
+            lab.setStyleSheet(label_css)
         self._smart_wait_bar.setStyleSheet(
             "QProgressBar { background-color: " + toks["GLASS_HI_STRONG"]
             + "; border: none; border-radius: 3px; }"
@@ -283,83 +548,55 @@ class _OverlayBar(QWidget):
         )
         self._apply_state_glow(self._state)
 
-    # ---- layout state ----
+    # ---- layout state (vertical, centered with top/bottom stretches) ----
     def _clear_layout(self):
+        # Remove every item (widgets + stretches) from the layout. Widgets stay
+        # children of the frame and are hidden by _hide_all; nothing is left
+        # managed, so the next build can't overlap the previous one.
         while self._inner_layout.count():
-            item = self._inner_layout.takeAt(0)
-            w = item.widget()
-            if w:
-                w.setParent(self._frame)
+            self._inner_layout.takeAt(0)
+
+    def _hide_all(self):
+        for w in (self._btn_record, self._btn_stop, self._btn_pause,
+                  self._btn_workflows, self._dot, self._sep,
+                  self._step_label, self._progress_label,
+                  self._smart_wait_label, self._smart_wait_bar):
+            w.hide()
+
+    def _add(self, widget):
+        self._inner_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignHCenter)
+        widget.show()
 
     def _set_idle_layout(self):
         self._clear_layout()
-        self._btn_record.show()
-        self._btn_workflows.show()
-        self._btn_stop.hide()
-        self._btn_pause.hide()
-        self._dot.hide()
-        self._sep.hide()
-        self._step_label.hide()
-        self._progress_label.hide()
-        self._smart_wait_label.hide()
-        self._smart_wait_bar.hide()
-        self._inner_layout.addWidget(self._btn_record)
-        self._inner_layout.addWidget(self._btn_workflows)
-        self._inner_layout.addStretch(1)
+        self._hide_all()
+        self._add(self._btn_record)
+        self._add(self._btn_workflows)
 
     def _set_recording_layout(self):
         self._clear_layout()
+        self._hide_all()
         self.set_paused(False)  # each recording starts un-paused
-        self._btn_record.hide()
-        self._btn_workflows.hide()
-        self._btn_stop.show()
-        self._btn_pause.show()
-        self._dot.show()
-        self._sep.show()
-        self._step_label.show()
-        self._progress_label.hide()
-        self._smart_wait_label.hide()
-        self._smart_wait_bar.hide()
-        self._inner_layout.addWidget(self._btn_stop)
-        self._inner_layout.addWidget(self._btn_pause)
-        self._inner_layout.addWidget(self._sep)
-        self._inner_layout.addWidget(self._dot)
-        self._inner_layout.addWidget(self._step_label)
-        self._inner_layout.addStretch(1)
+        self._add(self._dot)
+        self._add(self._step_label)
+        self._add(self._sep)
+        self._add(self._btn_pause)
+        self._add(self._btn_stop)
 
     def _set_playing_layout(self):
         self._clear_layout()
-        self._btn_record.hide()
-        self._btn_workflows.hide()
-        self._btn_stop.show()
-        self._btn_pause.hide()
-        self._dot.hide()
-        self._sep.hide()
-        self._step_label.hide()
-        self._progress_label.show()
-        self._smart_wait_label.hide()
-        self._smart_wait_bar.hide()
-        self._inner_layout.addWidget(self._btn_stop)
-        self._inner_layout.addWidget(self._sep)
-        self._inner_layout.addWidget(self._progress_label)
-        self._inner_layout.addStretch(1)
+        self._hide_all()
+        self._add(self._progress_label)
+        self._add(self._sep)
+        self._add(self._btn_stop)
 
     def _set_smart_waiting_layout(self):
         self._clear_layout()
-        self._btn_record.hide()
-        self._btn_workflows.hide()
-        self._btn_stop.show()
-        self._btn_pause.hide()
-        self._dot.hide()
-        self._sep.show()
-        self._step_label.hide()
-        self._progress_label.hide()
-        self._smart_wait_label.show()
-        self._smart_wait_bar.show()
-        self._inner_layout.addWidget(self._btn_stop)
-        self._inner_layout.addWidget(self._sep)
-        self._inner_layout.addWidget(self._smart_wait_label, 1)
-        self._inner_layout.addWidget(self._smart_wait_bar)
+        self._hide_all()
+        self._add(self._smart_wait_label)
+        self._add(self._smart_wait_bar)
+        self._add(self._sep)
+        self._add(self._btn_stop)
 
     def set_state(self, state: OverlayState):
         self._state = state
@@ -375,72 +612,82 @@ class _OverlayBar(QWidget):
         elif state == OverlayState.SMART_WAITING:
             self._set_smart_waiting_layout()
             self._dot.stop_pulse()
+        # Resize to the new content and resolve positions synchronously so the
+        # freshly shown widgets never flash at stale/overlapping spots.
+        self._fit()
         self._apply_state_glow(state)
+        # A state change is worth seeing — reveal now, then auto-hide when idle.
+        self._hold_revealed()
+        self._update_dock()
 
     def _apply_state_glow(self, state: OverlayState):
+        dx = -5 if self._is_right() else 5  # cast the shadow into the screen
         if state == OverlayState.RECORDING:
-            motion.set_glow(self._shadow, theme.RECORD_RED.name(), blur=46, alpha=185)
+            motion.set_glow(self._shadow, theme.RECORD_RED.name(), blur=46, alpha=185, dx=dx)
         elif state in (OverlayState.PLAYING, OverlayState.SMART_WAITING):
-            motion.set_glow(self._shadow, theme.manager.color("ACCENT").name(), blur=44, alpha=165)
+            motion.set_glow(self._shadow, theme.manager.color("ACCENT").name(),
+                            blur=44, alpha=165, dx=dx)
         else:
-            motion.set_glow(self._shadow, "#000000", blur=28, alpha=180, dy=9)
+            motion.set_glow(self._shadow, "#000000", blur=28, alpha=170, dx=dx)
 
     def set_paused(self, paused: bool):
         self._paused_state = paused
         prim = theme.manager.color("TEXT_PRIMARY").name()
         if paused:
-            self._btn_pause.setText("Resume")
-            self._btn_pause.setIcon(icons.icon("play_fill", prim, 13))
+            self._btn_pause.setToolTip("Resume")
+            self._btn_pause.setIcon(icons.icon("play_fill", prim, 16))
         else:
-            self._btn_pause.setText("Pause")
-            self._btn_pause.setIcon(icons.icon("pause", prim, 14))
+            self._btn_pause.setToolTip("Pause")
+            self._btn_pause.setIcon(icons.icon("pause", prim, 16))
 
     def set_step_count(self, n: int):
-        self._step_label.setText(f"{n} steps")
+        self._step_label.setText(str(n))
+        self._step_label.setToolTip(f"{n} steps recorded")
 
     def set_playback_progress(self, current: int, total: int, description: str):
-        desc = description[:30] + "…" if len(description) > 30 else description
-        self._progress_label.setText(f"Step {current} / {total}  ·  {desc}")
-
-    @staticmethod
-    def _short_name(element_name: str) -> str:
-        name = element_name or "element"
-        return name[:14] + "…" if len(name) > 15 else name
+        self._progress_label.setText(f"{current}/{total}")
+        self._progress_label.setToolTip(description or "")
 
     def show_smart_wait(self, element_name: str, elapsed: int, timeout: int):
-        self._smart_wait_label.setText(
-            f"⏳ Waiting for '{self._short_name(element_name)}'…  {elapsed}s / {timeout}s"
+        self._smart_wait_label.setText(f"{elapsed}s")
+        self._smart_wait_label.setToolTip(
+            f"Waiting for '{element_name or 'element'}'  ·  {elapsed}s / {timeout}s"
         )
         self._smart_wait_bar.setRange(0, max(1, timeout))
         self._smart_wait_bar.setValue(min(elapsed, timeout))
 
     def show_smart_wait_found(self, element_name: str, elapsed: int):
-        self._smart_wait_label.setText(
-            f"✅ Found '{self._short_name(element_name)}' after {elapsed}s"
+        self._smart_wait_label.setText("✓")
+        self._smart_wait_label.setToolTip(
+            f"Found '{element_name or 'element'}' after {elapsed}s"
         )
         self._smart_wait_bar.setValue(self._smart_wait_bar.maximum())
 
     def show_smart_wait_timeout(self, element_name: str, timeout: int):
-        self._smart_wait_label.setText(
-            f"⚠️ '{self._short_name(element_name)}' not found after {timeout}s"
+        self._smart_wait_label.setText("!")
+        self._smart_wait_label.setToolTip(
+            f"'{element_name or 'element'}' not found after {timeout}s"
         )
 
-    # ---- entrance animation ----
+    # ---- entrance animation (slide in from the edge) ----
     def _animate_in(self):
+        # Reveal on launch (slide in fully) so the user sees where it lives; the
+        # hover poll tucks it to the edge once the reveal hold expires.
         self.setWindowOpacity(0.0)
-        final_pos = self.pos()
-        start_pos = QPoint(final_pos.x(), final_pos.y() + 10)
+        self._docked_out = True
+        self._hold_revealed()
+        self.move(self._offscreen_x(), self._center_y())
 
         fade = QPropertyAnimation(self, b"windowOpacity", self)
-        fade.setDuration(190)
+        fade.setDuration(220)
         fade.setStartValue(0.0)
         fade.setEndValue(_TARGET_OPACITY)
         fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         slide = QPropertyAnimation(self, b"pos", self)
-        slide.setDuration(220)
-        slide.setStartValue(start_pos)
-        slide.setEndValue(final_pos)
+        slide.setDuration(300)
+        slide.setStartValue(QPoint(self._offscreen_x(), self._center_y()))
+        slide.setEndValue(QPoint(self._out_x(), self._center_y()))
         slide.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         group = QParallelAnimationGroup(self)
@@ -451,18 +698,11 @@ class _OverlayBar(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._animate_in()
+        self._hover_timer.start()
 
-    # ---- dragging ----
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-
-    def mouseMoveEvent(self, event):
-        if self._drag_pos is not None:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
-
-    def mouseReleaseEvent(self, event):
-        self._drag_pos = None
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._hover_timer.stop()
 
 
 class OverlayController(QObject):
@@ -480,6 +720,7 @@ class OverlayController(QObject):
         super().__init__()
         self._bar = _OverlayBar()
         self._flash = _BorderFlash()
+        self._glow = _PlaybackGlow()
         self._state = OverlayState.IDLE
 
         self._invoke.connect(self._run_on_gui)
@@ -510,7 +751,11 @@ class OverlayController(QObject):
         def _do():
             self._bar.hide()
             self._flash.hide()
+            self._glow.stop()
         self._dispatch(_do)
+
+    def set_side(self, side: str):
+        self._dispatch(lambda: self._bar.set_side(side))
 
     def set_state(self, state: OverlayState):
         self._dispatch(lambda: self._do_set_state(state))
@@ -524,6 +769,11 @@ class OverlayController(QObject):
             self._flash.flash()
         elif prev == OverlayState.RECORDING and state == OverlayState.IDLE:
             self._flash.flash()
+        # Ambient playback glow — on while replaying / smart-waiting, off otherwise.
+        if state in (OverlayState.PLAYING, OverlayState.SMART_WAITING):
+            self._glow.start()
+        else:
+            self._glow.stop()
 
     def set_step_count(self, n: int):
         self._dispatch(lambda: self._bar.set_step_count(n))

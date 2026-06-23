@@ -1,5 +1,7 @@
 import json
 import logging
+import math
+import random
 import traceback
 from datetime import datetime
 from typing import Optional
@@ -46,7 +48,7 @@ from flowrecord.ui.settings_window import SettingsWindow
 from flowrecord.ui.recording_detail import RecordingDetailPage
 from flowrecord.ui.components import (
     Logo, PillButton, RecordPill, RecordingCard, SearchInput,
-    SegmentedControl, _style, ask_text, confirm, info,
+    SegmentedControl, SmoothScrollArea, _style, ask_text, confirm, info,
 )
 from flowrecord.storage import workflow_store as store
 
@@ -715,6 +717,123 @@ class _LibraryPage(QWidget):
             p.raise_()
 
 
+class _LeafSidebar(QFrame):
+    """Sidebar with a faint static leaf watermark plus a few leaves drifting
+    gently down behind the nav — a calm, cute nature ambience. The animation
+    timer only runs while the sidebar is visible, so it's free in the tray."""
+
+    _FPS_MS = 8  # ~120 fps for a smooth drift (motion is dt-based, so speed is unchanged)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._leaves: list[dict] = []
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._FPS_MS)
+        self._timer.timeout.connect(self._tick)
+        theme.manager.changed.connect(self.update)
+
+    def _spawn(self, *, from_top: bool) -> dict:
+        return {
+            "x": random.uniform(0.08, 0.92),       # horizontal anchor (frac of w)
+            "y": random.uniform(-0.18, -0.02) if from_top else random.uniform(0.0, 1.0),
+            "vy": random.uniform(0.028, 0.055),    # fall speed (frac of h / s)
+            "amp": random.uniform(0.015, 0.05),    # sway amplitude (frac of w)
+            "freq": random.uniform(0.45, 1.05),    # sway cycles / s
+            "phase": random.uniform(0.0, 6.2832),
+            "size": random.uniform(0.16, 0.30),    # leaf length (frac of w)
+            "tilt": random.uniform(0.0, 360.0),
+            "spin": random.uniform(-22.0, 22.0),   # deg / s
+            "op": random.uniform(0.10, 0.20),
+        }
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._leaves:
+            self._leaves = [self._spawn(from_top=False) for _ in range(4)]
+        self._timer.start()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._timer.stop()
+
+    def _tick(self) -> None:
+        dt = self._FPS_MS / 1000.0
+        for lf in self._leaves:
+            lf["y"] += lf["vy"] * dt
+            lf["phase"] += lf["freq"] * dt * 6.2832
+            lf["tilt"] += lf["spin"] * dt
+            if lf["y"] > 1.18:
+                lf.update(self._spawn(from_top=True))
+        self.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)  # styled QSS background first
+        from PySide6.QtGui import QPainter
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        acc = theme.manager.color("ACCENT")
+        dark = theme.manager.is_dark()
+
+        # Large static watermark anchored low.
+        p.setOpacity(0.08 if dark else 0.06)
+        icons.draw_leaf(p, w * 0.52, h * 0.80, length=w * 1.2,
+                        fill=acc, vein=acc, tilt=-26.0, detail=False)
+
+        # Gently drifting leaves.
+        boost = 1.25 if dark else 1.0
+        for lf in self._leaves:
+            x = (lf["x"] + math.sin(lf["phase"]) * lf["amp"]) * w
+            y = lf["y"] * h
+            p.setOpacity(min(0.30, lf["op"] * boost))
+            icons.draw_leaf(p, x, y, length=lf["size"] * w,
+                            fill=acc, vein=acc, tilt=lf["tilt"], detail=False)
+        p.end()
+
+
+class _PulseDot(QWidget):
+    """A small 'breathing' status dot: a steady green core with a soft halo that
+    gently pulses, signalling the app is alive and listening for hotkeys."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(14, 14)
+        self._t = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(8)   # ~120 fps
+        self._timer.timeout.connect(self._tick)
+        theme.manager.changed.connect(self.update)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._timer.start()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._timer.stop()
+
+    def _tick(self) -> None:
+        self._t += 0.0085   # scaled for 120 fps — same breathing speed as before
+        self.update()
+
+    def paintEvent(self, e):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QColor, QPainter
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = theme.manager.color("SUCCESS")
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        pulse = (math.sin(self._t) + 1.0) / 2.0  # 0..1
+        p.setPen(Qt.PenStyle.NoPen)
+        halo = QColor(c)
+        halo.setAlphaF(0.06 + 0.20 * (1.0 - pulse))
+        p.setBrush(halo)
+        p.drawEllipse(QPointF(cx, cy), 4.0 + 3.0 * pulse, 4.0 + 3.0 * pulse)
+        p.setBrush(c)
+        p.drawEllipse(QPointF(cx, cy), 3.2, 3.2)
+        p.end()
+
+
 class WorkflowManagerWindow(FramelessDialog):
     play_requested = Signal(int, float, int, bool)  # id, speed, repeat, loop
     new_requested = Signal()
@@ -768,7 +887,7 @@ class WorkflowManagerWindow(FramelessDialog):
     # Sidebar
     # ------------------------------------------------------------------
     def _build_sidebar(self) -> QFrame:
-        bar = QFrame()
+        bar = _LeafSidebar()
         bar.setObjectName("sidebar")
         bar.setFixedWidth(216)
         v = QVBoxLayout(bar)
@@ -800,9 +919,7 @@ class WorkflowManagerWindow(FramelessDialog):
         sv.setSpacing(3)
         line = QHBoxLayout()
         line.setSpacing(8)
-        dot = QFrame()
-        dot.setObjectName("statusDot")
-        dot.setFixedSize(8, 8)
+        dot = _PulseDot()
         running = QLabel("Running in tray")
         running.setObjectName("statusMain")
         line.addWidget(dot)
@@ -859,7 +976,7 @@ class WorkflowManagerWindow(FramelessDialog):
         self._search_box.textChanged.connect(self._on_search)
         v.addWidget(self._search_box)
 
-        self._scroll = QScrollArea()
+        self._scroll = SmoothScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

@@ -29,6 +29,7 @@ _STEP_META = {
     "keypress": ("Key press", "keypress", "key"),
     "type_text": ("Type text", "type_text", "key"),
     "scroll": ("Scroll", "scroll", "scroll"),
+    "move": ("Move", "click", "move"),
     "delay": ("Wait", "delay", "wait"),
     "launch_app": ("Launch app", "launch_app", "app"),
 }
@@ -36,6 +37,7 @@ _CAT_COLOR = {
     "click": "#2563EB",
     "key": "#6366F1",
     "scroll": "#0EA5E9",
+    "move": "#14B8A6",
     "wait": "#F59E0B",
     "app": "#22C55E",
 }
@@ -76,6 +78,8 @@ def _subtitle(step) -> str:
         if step.description:
             return step.description
         return "Scroll up" if step.scroll_dy > 0 else "Scroll down"
+    if t == "move":
+        return f"({step.x}, {step.y})" if step.x is not None else (step.description or "")
     if t == "delay":
         return f"{step.delay_after:.1f} seconds"
     if t == "launch_app":

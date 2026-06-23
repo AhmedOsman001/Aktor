@@ -31,85 +31,89 @@ from PySide6.QtGui import QColor
 # Token *names* are kept stable so existing painter code and QSS keep resolving;
 # only the values change to the new design language.
 
+# Nature palette — "Deep Forest" (dark) & "Morning Meadow" (light): mossy
+# greens, bark text, parchment canvas, leaf-green accent. Token *names* stay
+# stable so existing painter code and QSS keep resolving; only values change.
+
 _DARK = {
-    "BG_APP": "#1c1c1e",          # canvas
-    "BG_SURFACE": "#2c2c2e",      # cards / surfaces
-    "BG_ELEVATED": "#3a3a3c",     # elevated control fill
-    "BG_INSET": "#3a3a3c",        # filled inputs / segmented track
-    "BG_OVERLAY": "#2c2c2e",
-    "OVERLAY_BG": "rgba(40, 40, 43, 236)",
-    "OVERLAY_TOP": "#3a3a3c",
-    # Calm flat canvas (no heavy gradient depth).
-    "BG_GRAD_TOP": "#1c1c1e",
-    "BG_GRAD_BOTTOM": "#1c1c1e",
-    # Flat card surface.
-    "CARD_TOP": "#2c2c2e",
-    "CARD_BOTTOM": "#2c2c2e",
-    "CARD_HOVER_TOP": "#323234",
-    "CONTROL_FILL": "#3a3a3c",    # search, inputs, segmented track, secondary btn
-    "BORDER": "#38383a",          # hairline / divider
+    "BG_APP": "#0f150e",          # forest-floor canvas
+    "BG_SURFACE": "#18211a",      # cards / surfaces (deep moss)
+    "BG_ELEVATED": "#27322a",     # elevated control fill
+    "BG_INSET": "#222c23",        # filled inputs / segmented track
+    "BG_OVERLAY": "#18211a",
+    "OVERLAY_BG": "rgba(24, 33, 26, 240)",
+    "OVERLAY_TOP": "#27322a",
+    # Subtle canopy depth — light filtering down through the trees.
+    "BG_GRAD_TOP": "#121a11",
+    "BG_GRAD_BOTTOM": "#0d120c",
+    "CARD_TOP": "#18211a",
+    "CARD_BOTTOM": "#18211a",
+    "CARD_HOVER_TOP": "#1e281f",
+    "CONTROL_FILL": "#27322a",    # search, inputs, segmented track, secondary btn
+    "BORDER": "#2c3a2e",          # hairline / divider
     "BORDER_STRONG": "rgba(255,255,255,0.20)",
-    "HAIRLINE": "#38383a",
+    "HAIRLINE": "#2c3a2e",
     "GLASS_HI": "rgba(255,255,255,0.06)",
     "GLASS_HI_STRONG": "rgba(255,255,255,0.13)",
-    "TEXT_PRIMARY": "#f5f5f7",    # heading
-    "TEXT_SECONDARY": "#c7c7cc",  # body
-    "TEXT_MUTED": "#8e8e93",      # meta / muted
-    "TEXT_DISABLED": "#5a5a5e",
+    "TEXT_PRIMARY": "#eef4e8",    # moonlit leaf-white
+    "TEXT_SECONDARY": "#c6d4bd",  # body
+    "TEXT_MUTED": "#8a9a80",      # sage meta
+    "TEXT_DISABLED": "#5d6a55",
     "TEXT_ON_ACCENT": "#ffffff",
     # Status / badge soft fills + text (per-mode).
-    "SUCCESS_SOFT": "rgba(34,197,94,0.20)",
-    "SUCCESS_TEXT": "#4ade80",
-    "DANGER_SOFT": "rgba(239,68,68,0.20)",
-    "DANGER_TEXT": "#ff6b6b",
-    "IDLE_SOFT": "rgba(255,255,255,0.08)",
-    "IDLE_TEXT": "#a1a1a6",
-    # Component-library extras (dark)
-    "SEG_SEL": "#5a5a5e",
-    "CHIP_FILL": "#3a3a3c",
-    "CHIP_BORDER": "#4a4a4c",
-    "SIDEBAR": "rgba(36,36,38,0.94)",
-    "DISABLED_FILL": "#2a2a2c",
-    "IDLE_DOT": "#9ca3af",
+    "SUCCESS_SOFT": "rgba(74,222,128,0.20)",
+    "SUCCESS_TEXT": "#86efac",
+    "DANGER_SOFT": "rgba(239,90,68,0.22)",
+    "DANGER_TEXT": "#ff8a73",
+    "IDLE_SOFT": "rgba(255,255,255,0.07)",
+    "IDLE_TEXT": "#9aa890",
+    # Extras (dark)
+    "SEG_SEL": "#3a4a38",
+    "CHIP_FILL": "#27322a",
+    "CHIP_BORDER": "#374a36",
+    "SIDEBAR": "rgba(20,28,21,0.95)",
+    "DISABLED_FILL": "#1d261c",
+    "IDLE_DOT": "#86a07e",
 }
 
 _LIGHT = {
-    "BG_APP": "#f5f6f8",          # canvas
-    "BG_SURFACE": "#ffffff",      # cards / surfaces
-    "BG_ELEVATED": "#f1f3f5",
-    "BG_INSET": "#f1f3f5",        # filled inputs / segmented track
+    "BG_APP": "#f3f7ee",          # soft sage-parchment canvas
+    "BG_SURFACE": "#ffffff",      # clean cards / surfaces
+    "BG_ELEVATED": "#eaf1e2",
+    "BG_INSET": "#eaf1e2",        # filled inputs / segmented track
     "BG_OVERLAY": "#ffffff",
-    "OVERLAY_BG": "rgba(255, 255, 255, 238)",
+    "OVERLAY_BG": "rgba(255, 255, 255, 240)",
     "OVERLAY_TOP": "#ffffff",
-    "BG_GRAD_TOP": "#f5f6f8",
-    "BG_GRAD_BOTTOM": "#f5f6f8",
+    # Morning light over a meadow — a whisper of green at the base.
+    "BG_GRAD_TOP": "#f5f9f0",
+    "BG_GRAD_BOTTOM": "#e9f0df",
     "CARD_TOP": "#ffffff",
     "CARD_BOTTOM": "#ffffff",
     "CARD_HOVER_TOP": "#ffffff",
-    "CONTROL_FILL": "#f1f3f5",
-    "BORDER": "#e5e7eb",          # hairline / divider
+    "CONTROL_FILL": "#eaf1e2",
+    "BORDER": "#dde7d0",          # soft leaf hairline / divider
     "BORDER_STRONG": "rgba(0,0,0,0.14)",
-    "HAIRLINE": "#e5e7eb",
+    "HAIRLINE": "#dde7d0",
     "GLASS_HI": "rgba(0,0,0,0.04)",
     "GLASS_HI_STRONG": "rgba(0,0,0,0.08)",
-    "TEXT_PRIMARY": "#111827",    # heading
-    "TEXT_SECONDARY": "#374151",  # body
-    "TEXT_MUTED": "#9ca3af",      # meta / muted
-    "TEXT_DISABLED": "#c0c4cc",
+    "TEXT_PRIMARY": "#1c2a1a",    # deep forest / bark heading
+    "TEXT_SECONDARY": "#3c4a36",  # bark body
+    "TEXT_MUTED": "#73826a",      # sage meta
+    "TEXT_DISABLED": "#aeb9a4",
     "TEXT_ON_ACCENT": "#ffffff",
-    "SUCCESS_SOFT": "#dcfce7",
-    "SUCCESS_TEXT": "#16a34a",
-    "DANGER_SOFT": "#fee2e2",
-    "DANGER_TEXT": "#ef4444",
-    "IDLE_SOFT": "#f1f3f5",
-    "IDLE_TEXT": "#6b7280",
-    # Component-library extras (light)
+    "SUCCESS_SOFT": "#d8f3df",
+    "SUCCESS_TEXT": "#15803d",
+    "DANGER_SOFT": "#fde8e2",
+    "DANGER_TEXT": "#c2533c",
+    "IDLE_SOFT": "#eaf1e2",
+    "IDLE_TEXT": "#6b7a62",
+    # Extras (light)
     "SEG_SEL": "#ffffff",
     "CHIP_FILL": "#ffffff",
-    "CHIP_BORDER": "#e5e7eb",
-    "SIDEBAR": "rgba(250,251,252,0.94)",
-    "DISABLED_FILL": "#f3f4f6",
-    "IDLE_DOT": "#9ca3af",
+    "CHIP_BORDER": "#dde7d0",
+    "SIDEBAR": "rgba(240,245,234,0.95)",
+    "DISABLED_FILL": "#eef2e8",
+    "IDLE_DOT": "#9caf90",
 }
 
 # Solid semantic colors — shared across modes. (Soft fills + status text live in
@@ -130,7 +134,7 @@ _SEMANTIC = {
 _FONT_BASE = '"Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif'
 
 DEFAULT_MODE = "dark"
-DEFAULT_ACCENT = "#2563eb"
+DEFAULT_ACCENT = "#3a9d5a"  # fresh leaf green
 
 # Recording red (for the live pulse dot) — matches the record gradient identity.
 RECORD_RED = QColor(244, 63, 94)
@@ -153,8 +157,8 @@ def _rgba(c: QColor, alpha: float) -> str:
 def _accent_ramp(base: str, mode: str = "dark") -> dict:
     """Derive the accent-related tokens from a single base accent color.
 
-    For the component-library blue (#2563EB) the hover/pressed states *darken*
-    (#1D4ED8 …), and the soft fill is light on white / translucent on dark.
+    For the leaf-green accent (#3A9D5A) the hover/pressed states *darken* into
+    deeper foliage, and the soft fill is light on white / translucent on dark.
     """
     c = QColor(base)
     if not c.isValid():
@@ -545,23 +549,22 @@ QSplitter::handle:vertical:hover { background: @GLASS_HI@; }
 """
 
 
-# ---- Overlay pill stylesheet ----
+# ---- Overlay dock stylesheet (slim vertical bar on the left edge) ----
 _OVERLAY_TPL = """
 #pillFrame {
     background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 @OVERLAY_TOP@, stop:1 @OVERLAY_BG@);
     border: 1px solid @BORDER_STRONG@;
-    border-radius: 18px;
+    border-radius: 22px;
 }
+/* Square icon buttons stacked vertically. */
 QPushButton {
-    border-radius: 12px;
-    padding: 9px 16px;
-    font-size: 13px;
-    font-weight: 600;
+    border-radius: 13px;
+    padding: 0;
     border: 1px solid transparent;
     color: #ffffff;
 }
-/* Record / Stop — red-gradient pill (record identity). */
+/* Record / Stop — red-gradient (record identity). */
 QPushButton#btnRecord, QPushButton#btnStop {
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
         stop:0 @RECORD_GRAD_TOP@, stop:1 @RECORD_GRAD_BOTTOM@);

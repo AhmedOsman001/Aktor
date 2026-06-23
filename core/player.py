@@ -1,3 +1,4 @@
+import json
 import logging
 import subprocess
 import threading
@@ -177,6 +178,7 @@ class Player:
             "keypress": self._do_keypress,
             "type_text": self._do_type_text,
             "scroll": self._do_scroll,
+            "move": self._do_move,
             "launch_app": self._do_launch_app,
             "delay": lambda s: None,
         }.get(step.type)
@@ -302,8 +304,16 @@ class Player:
                 )
                 return found["x"], found["y"]
             else:
-                logger.warning("Element '%s' not found, falling back to coordinates", step.element_name)
+                logger.warning("Element '%s' not found — attempting self-heal", step.element_name)
 
+        # --- Self-heal ladder (selectors missed) ---------------------------
+        # Re-find a stable nearby anchor captured at record time and apply the
+        # saved click offset from it.
+        pt = self._heal_via_anchor(step)
+        if pt:
+            return pt
+
+        # Window-relative coordinates (handles a moved/resized window).
         if step.x_relative is not None and step.y_relative is not None:
             coords = self._relative_to_absolute(
                 step.app_name, step.window_title, step.x_relative, step.y_relative
@@ -312,12 +322,57 @@ class Player:
                 logger.debug("Using relative coords within window")
                 return coords
 
+        # Last-resort absolutes from record time: element-rect center, then raw.
+        pt = self._heal_via_rect(step)
+        if pt:
+            return pt
         if step.x is not None and step.y is not None:
             logger.debug("Falling back to raw coordinates (%d, %d)", step.x, step.y)
             return step.x, step.y
 
         logger.warning("No coordinates available for click step")
         return 0, 0
+
+    # ---- self-heal rungs -------------------------------------------------
+    def _heal_via_anchor(self, step: ActionStep) -> Optional[tuple[int, int]]:
+        """Re-find a stable neighbour captured at record time and apply the saved
+        click offset from its center."""
+        if not step.anchor:
+            return None
+        try:
+            a = json.loads(step.anchor)
+        except Exception:
+            return None
+        name, aid = a.get("name"), a.get("automation_id")
+        if not (name or aid):
+            return None
+        found = find_element(
+            app_name=step.app_name,
+            element_name=name,
+            element_type=a.get("control_type"),
+            window_title=step.window_title,
+            x=step.x,
+            y=step.y,
+            automation_id=aid,
+        )
+        if found and found.get("x") is not None and found.get("y") is not None:
+            tx = int(found["x"] + a.get("dx", 0))
+            ty = int(found["y"] + a.get("dy", 0))
+            logger.info("Self-heal via anchor %r -> (%d, %d)", aid or name, tx, ty)
+            return tx, ty
+        return None
+
+    def _heal_via_rect(self, step: ActionStep) -> Optional[tuple[int, int]]:
+        """Last-resort absolute: the element's recorded bounding-rect center."""
+        if not step.element_rect:
+            return None
+        try:
+            l, t, r, b = (int(v) for v in step.element_rect.split(","))
+        except Exception:
+            return None
+        cx, cy = (l + r) // 2, (t + b) // 2
+        logger.info("Self-heal via element-rect center -> (%d, %d)", cx, cy)
+        return cx, cy
 
     def _relative_to_absolute(
         self,
@@ -392,6 +447,14 @@ class Player:
             return
         logger.debug("typing %d chars: %r", len(step.text), step.text[:60])
         pyautogui.write(step.text, interval=0.02)
+
+    def _do_move(self, step: ActionStep) -> None:
+        if step.x is None or step.y is None:
+            return
+        try:
+            pyautogui.moveTo(step.x, step.y)
+        except Exception:
+            logger.debug("move to (%s, %s) failed", step.x, step.y)
 
     def _do_scroll(self, step: ActionStep) -> None:
         # Scale notches -> raw wheel units.
