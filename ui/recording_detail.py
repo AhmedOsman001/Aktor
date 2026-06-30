@@ -3,6 +3,7 @@
 Aktor design. Keeps FlowRecord's engine/model (ActionStep) underneath.
 """
 
+import re
 from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
@@ -12,11 +13,12 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from flowrecord.core.variables import extract_variables
 from flowrecord.models import Workflow
 from flowrecord.storage import workflow_store as store
 from flowrecord.ui import icons, theme
 from flowrecord.ui.components import (
-    HotkeyPill, PlayButton, SegmentedControl, Stepper, ToggleSwitch,
+    HotkeyPill, PillButton, PlayButton, SegmentedControl, Stepper, ToggleSwitch,
     _style, ask_text, pretty_hotkey,
 )
 
@@ -30,6 +32,7 @@ _STEP_META = {
     "type_text": ("Type text", "type_text", "key"),
     "scroll": ("Scroll", "scroll", "scroll"),
     "move": ("Move", "click", "move"),
+    "drag": ("Drag", "click", "drag"),
     "delay": ("Wait", "delay", "wait"),
     "launch_app": ("Launch app", "launch_app", "app"),
 }
@@ -38,9 +41,16 @@ _CAT_COLOR = {
     "key": "#6366F1",
     "scroll": "#0EA5E9",
     "move": "#14B8A6",
+    "drag": "#8B5CF6",
     "wait": "#F59E0B",
     "app": "#22C55E",
 }
+
+
+def _slug_var(s: str) -> str:
+    """Normalise a label into a tidy variable name, e.g. 'Email address' -> 'email_address'."""
+    s = re.sub(r"[^a-z0-9_]+", "_", (s or "").strip().lower())
+    return re.sub(r"_+", "_", s).strip("_")[:32]
 
 
 def _soft(hex_color: str) -> str:
@@ -80,6 +90,10 @@ def _subtitle(step) -> str:
         return "Scroll up" if step.scroll_dy > 0 else "Scroll down"
     if t == "move":
         return f"({step.x}, {step.y})" if step.x is not None else (step.description or "")
+    if t == "drag":
+        start = step.element_name or (f"({step.x}, {step.y})" if step.x is not None else "")
+        end = f"→ ({step.x2}, {step.y2})" if step.x2 is not None else ""
+        return f"{start}  {end}".strip() or (step.description or "")
     if t == "delay":
         return f"{step.delay_after:.1f} seconds"
     if t == "launch_app":
@@ -102,10 +116,14 @@ class _TimelineRow(QFrame):
     """A timeline step row with inline per-step delay + Smart Wait editing."""
 
     changed = Signal()
+    remove_requested = Signal()
+    variable_requested = Signal()
+    clicked = Signal()
 
     def __init__(self, step, parent=None):
         super().__init__(parent)
         self._step = step
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         # Smart Wait only makes sense for steps that target a UI element.
         self._sw_supported = bool(step.element_name)
         self.setObjectName("tlRow")
@@ -136,6 +154,16 @@ class _TimelineRow(QFrame):
         text.addWidget(title)
         text.addWidget(sub)
         lay.addLayout(text, 1)
+
+        # ---- variable binding (Type-text steps only) ----
+        self._var = None
+        if step.type == "type_text":
+            self._var = QPushButton()
+            self._var.setObjectName("tlVar")
+            self._var.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._var.clicked.connect(self.variable_requested.emit)
+            self._update_var_btn()
+            lay.addWidget(self._var)
 
         # ---- per-step delay ----
         self._delay = QDoubleSpinBox()
@@ -184,14 +212,60 @@ class _TimelineRow(QFrame):
         sc.addWidget(self._sw_action)
         lay.addWidget(self._sw_controls)
 
+        # ---- remove step ----
+        self._remove = QPushButton()
+        self._remove.setObjectName("tlRemove")
+        self._remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._remove.setFixedSize(28, 28)
+        self._remove.setIconSize(QSize(15, 15))
+        self._remove.setIcon(icons.icon("trash", theme.manager.color("TEXT_MUTED").name(), 15))
+        self._remove.setToolTip("Remove this step")
+        self._remove.clicked.connect(self.remove_requested.emit)
+        lay.addWidget(self._remove)
+
         self.setStyleSheet(_style(
             "#tlRow { background: transparent; border-radius: 10px; }"
             "#tlRow:hover { background: @CONTROL@; }"
             "#tlTitle { color: @HEADING@; font-size: 14px; font-weight: 600;"
             " background: transparent; }"
             "#tlSub { color: @MUTED@; font-size: 13px; background: transparent; }"
+            "#tlRemove { background: transparent; border: 0; border-radius: 7px; }"
+            "#tlRemove:hover { background: @DANGER_SOFT@; }"
+            "#tlVar { background: @CONTROL@; color: @MUTED@; border: 0;"
+            " border-radius: 8px; padding: 5px 10px; font-size: 12px; font-weight: 600; }"
+            "#tlVar:hover { color: @HEADING@; }"
+            "#tlVar[bound=\"true\"] { background: @ACCENT_SOFT@; color: @ACCENT_ON_SOFT@; }"
         ))
         self._sync_sw()
+
+    def _update_var_btn(self) -> None:
+        if self._var is None:
+            return
+        if self._step.variable:
+            self._var.setText("{{ %s }}" % self._step.variable)
+            self._var.setToolTip(
+                f"Variable “{self._step.variable}” — its value comes from a run "
+                "prompt or a CSV/Excel column. Click to edit or unbind.")
+            self._var.setProperty("bound", True)
+        else:
+            self._var.setText("+ variable")
+            self._var.setToolTip(
+                "Make this typed text a variable — fill it per run or from a "
+                "CSV/Excel column.")
+            self._var.setProperty("bound", False)
+        self._var.style().unpolish(self._var)
+        self._var.style().polish(self._var)
+
+    def mousePressEvent(self, e):
+        # Click the row (but not its inline controls) to inspect the step.
+        controls = [self._delay, self._sw, self._sw_controls, self._remove, self._var]
+        w = self.childAt(e.position().toPoint())
+        while w is not None and w is not self:
+            if w in controls:
+                return super().mousePressEvent(e)
+            w = w.parentWidget()
+        self.clicked.emit()
+        super().mousePressEvent(e)
 
     # ---- edits ----
     def _on_delay(self, val: float) -> None:
@@ -253,6 +327,8 @@ class _TimelineRow(QFrame):
 class RecordingDetailPage(QWidget):
     back_requested = Signal()
     play_requested = Signal(int, float, int, bool)  # id, speed, repeat, loop
+    run_values_requested = Signal(int)  # prompt for {{variable}} values, then run
+    batch_requested = Signal(int)       # run once per CSV/Excel row
     duplicate_requested = Signal(int)
     delete_requested = Signal(int)
     hotkey_changed = Signal(int, str)
@@ -371,6 +447,22 @@ class RecordingDetailPage(QWidget):
         hk.addWidget(self._hk_edit)
         v.addWidget(self._hk_field)
 
+        # ---- Variables & batch ----
+        v.addSpacing(8)
+        v.addWidget(self._label("VARIABLES", "sectionLabel"))
+        self._vars_label = QLabel("")
+        self._vars_label.setObjectName("fieldSub")
+        self._vars_label.setWordWrap(True)
+        v.addWidget(self._vars_label)
+        self._btn_values = PillButton("Run with values…", "secondary")
+        self._btn_values.clicked.connect(
+            lambda: self._wf and self.run_values_requested.emit(self._wf.id))
+        self._btn_batch = PillButton("Run batch (CSV / Excel)…", "secondary")
+        self._btn_batch.clicked.connect(
+            lambda: self._wf and self.batch_requested.emit(self._wf.id))
+        v.addWidget(self._btn_values)
+        v.addWidget(self._btn_batch)
+
         v.addSpacing(10)
         self._dup = self._action_row("Duplicate", "edit", False)
         self._dup.clicked.connect(lambda: self._wf and self.duplicate_requested.emit(self._wf.id))
@@ -400,6 +492,12 @@ class RecordingDetailPage(QWidget):
         self._meta.setText(f"{len(wf.steps)} steps · {wf.duration}")
         self._hotkey_pill.set_hotkey(wf.trigger.hotkey)
         self._set_hk_text(wf.trigger.hotkey)
+        names = extract_variables(wf.steps)
+        if names:
+            self._vars_label.setText("Uses: " + ", ".join("{{%s}}" % n for n in names))
+        else:
+            self._vars_label.setText("None yet — type {{name}} in a Type-text step "
+                                     "to fill it per-run or from a spreadsheet.")
         self._rebuild_timeline()
 
     def _rebuild_timeline(self) -> None:
@@ -409,9 +507,12 @@ class RecordingDetailPage(QWidget):
         box.setContentsMargins(2, 2, 8, 8)
         box.setSpacing(2)
         if self._wf and self._wf.steps:
-            for step in self._wf.steps:
+            for i, step in enumerate(self._wf.steps, start=1):
                 row = _TimelineRow(step)
                 row.changed.connect(self._schedule_save)
+                row.remove_requested.connect(lambda s=step: self._remove_step(s))
+                row.variable_requested.connect(lambda s=step: self._edit_variable(s))
+                row.clicked.connect(lambda s=step, n=i: self._show_step_details(s, n))
                 box.addWidget(row)
         else:
             empty = QLabel("No steps recorded.")
@@ -420,6 +521,49 @@ class RecordingDetailPage(QWidget):
             box.addWidget(empty)
         box.addStretch(1)
         self._tl_scroll.setWidget(container)
+
+    def _show_step_details(self, step, index=None) -> None:
+        from flowrecord.ui.step_details import StepDetailsDialog
+        StepDetailsDialog(step, index, self).exec()
+
+    def _edit_variable(self, step) -> None:
+        """Bind/unbind a Type-text step to a variable (name auto-suggested from
+        the field clicked just before it)."""
+        if not self._wf:
+            return
+        suggested = step.variable or self._suggest_var_name(step)
+        name, ok = ask_text(
+            self, "Variable",
+            "Variable name (letters, numbers, underscore).\nLeave blank to unbind:",
+            suggested,
+        )
+        if not ok:
+            return
+        step.variable = _slug_var(name) or None
+        self.set_workflow(self._wf)   # rebuild timeline + variables list
+        self._save_steps()
+
+    def _suggest_var_name(self, step) -> str:
+        try:
+            idx = self._wf.steps.index(step)
+        except (ValueError, AttributeError):
+            return ""
+        for j in range(idx - 1, -1, -1):
+            el = self._wf.steps[j].element_name
+            if el:
+                return _slug_var(el)
+        return ""
+
+    def _remove_step(self, step) -> None:
+        """Drop a step from the workflow, persist immediately, and rebuild."""
+        if not self._wf:
+            return
+        try:
+            self._wf.steps.remove(step)
+        except ValueError:
+            return
+        self.set_workflow(self._wf)   # rebuild timeline + meta + variables
+        self._save_steps()            # persist now (also emits steps_changed)
 
     # ---- per-step edits (delay / Smart Wait) ----
     def _schedule_save(self) -> None:

@@ -836,6 +836,8 @@ class _PulseDot(QWidget):
 
 class WorkflowManagerWindow(FramelessDialog):
     play_requested = Signal(int, float, int, bool)  # id, speed, repeat, loop
+    run_values_requested = Signal(int)  # id — prompt for variable values, then run
+    batch_requested = Signal(int)       # id — run once per CSV/Excel row
     new_requested = Signal()
     test_steps_requested = Signal(object)
     hotkeys_changed = Signal()  # a trigger changed → app re-registers hotkeys
@@ -1132,6 +1134,9 @@ class WorkflowManagerWindow(FramelessDialog):
             return
         menu = QMenu(self)
         act_play = menu.addAction("Play")
+        act_values = menu.addAction("Run with values…")
+        act_batch = menu.addAction("Run batch (CSV / Excel)…")
+        menu.addSeparator()
         act_open = menu.addAction("Open")
         act_rename = menu.addAction("Rename")
         act_fav = menu.addAction("Unfavorite" if wf.favorite else "Favorite")
@@ -1141,6 +1146,10 @@ class WorkflowManagerWindow(FramelessDialog):
         chosen = menu.exec(self.cursor().pos())
         if chosen is act_play:
             self.play_requested.emit(wf_id, 1.0, 1, False)
+        elif chosen is act_values:
+            self.run_values_requested.emit(wf_id)
+        elif chosen is act_batch:
+            self.batch_requested.emit(wf_id)
         elif chosen is act_open:
             self.show_detail(wf_id)
         elif chosen is act_rename:
@@ -1216,6 +1225,8 @@ class WorkflowManagerWindow(FramelessDialog):
         d = self._detail
         d.back_requested.connect(self.show_library)
         d.play_requested.connect(self.play_requested.emit)
+        d.run_values_requested.connect(self.run_values_requested.emit)
+        d.batch_requested.connect(self.batch_requested.emit)
         d.duplicate_requested.connect(lambda wid: (self._duplicate(wid), self.show_library()))
         d.delete_requested.connect(lambda wid: (self._on_delete(wid), self.show_library()))
         d.hotkey_changed.connect(self._on_hotkey_changed)

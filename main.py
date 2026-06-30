@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -31,6 +32,7 @@ _log_file = setup_logging()
 
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QSystemTrayIcon,
     QMenu,
 )
@@ -41,8 +43,10 @@ from flowrecord.config import APP_NAME, DATA_DIR, DEFAULT_RECORD_HOTKEY
 from flowrecord.listeners.hotkey_listener import register, unregister, unregister_all
 from flowrecord.models import Trigger, Workflow
 from flowrecord.ui import icons, theme, theme_prefs
-from flowrecord.ui.components import ask_text
+from flowrecord.ui.components import ask_text, info
 from flowrecord.ui.overlay import OverlayController, OverlayState
+from flowrecord.ui.variables_dialog import BatchDialog, RunValuesDialog
+from flowrecord.core import variables as varmod
 from flowrecord.core.player import Player
 from flowrecord.core.recorder import Recorder
 from flowrecord.ui.workflow_manager import WorkflowManagerWindow
@@ -172,6 +176,10 @@ class FlowRecordApp:
         self._wf_dialog: WorkflowManagerWindow | None = None
         self._play_remaining = 0
         self._play_loop = False
+        self._play_context: dict = {}      # variable values for the current play
+        # Batch (CSV/Excel) run state.
+        self._batch_thread: threading.Thread | None = None
+        self._batch_stop = threading.Event()
         # True while we close the manager ourselves (record/new), so the close
         # isn't mistaken for the user quitting via the window's X button.
         self._programmatic_close = False
@@ -325,6 +333,10 @@ class FlowRecordApp:
     def _stop(self):
         if self._recorder.recording:
             self._stop_recording()
+        elif self._batch_thread and self._batch_thread.is_alive():
+            # End the batch loop and the current row's playback.
+            self._batch_stop.set()
+            self._player.stop()
         elif self._player.playing:
             # Cancel any pending repeat/loop so playback doesn't restart.
             self._play_loop = False
@@ -401,6 +413,8 @@ class FlowRecordApp:
             return
         self._wf_dialog = WorkflowManagerWindow(self._build_prefs())
         self._wf_dialog.play_requested.connect(self._play_by_id)
+        self._wf_dialog.run_values_requested.connect(self._on_run_values)
+        self._wf_dialog.batch_requested.connect(self._on_batch)
         self._wf_dialog.new_requested.connect(self._on_new_from_manager)
         self._wf_dialog.test_steps_requested.connect(self._play_workflow)
         self._wf_dialog.hotkeys_changed.connect(self._register_global_hotkeys)
@@ -489,14 +503,15 @@ class FlowRecordApp:
             self._play_workflow(wf, speed, repeat, loop)
 
     def _play_workflow(self, wf: Workflow, speed: float = 1.0, repeat: int = 1,
-                       loop: bool = False):
+                       loop: bool = False, variables: dict | None = None):
         if self._recorder.recording:
             return
-        logger.info("Playing workflow '%s' (%d steps, speed=%.2gx, repeat=%d, loop=%s)",
-                    wf.name, len(wf.steps), speed, repeat, loop)
+        self._play_context = variables or {}
+        logger.info("Playing workflow '%s' (%d steps, speed=%.2gx, repeat=%d, loop=%s, vars=%d)",
+                    wf.name, len(wf.steps), speed, repeat, loop, len(self._play_context))
         self._overlay.show()
         self._overlay.set_state(OverlayState.PLAYING)
-        self._player.play(wf, speed)
+        self._player.play(wf, speed, variables=self._play_context)
 
         if wf.id:
             update_last_run(wf.id)
@@ -509,7 +524,7 @@ class FlowRecordApp:
             if not self._player.playing:
                 self._play_remaining -= 1
                 if self._play_loop or self._play_remaining > 0:
-                    self._player.play(wf, speed)
+                    self._player.play(wf, speed, variables=self._play_context)
                     return
                 timer.stop()
                 self._overlay.set_state(OverlayState.IDLE)
@@ -518,6 +533,83 @@ class FlowRecordApp:
         timer = QTimer()
         timer.timeout.connect(check_done)
         timer.start(200)
+
+    # ------------------------------------------------------------------
+    # Variables: run-with-values + CSV/Excel batch
+    # ------------------------------------------------------------------
+    def _on_run_values(self, wf_id: int):
+        wf = get_workflow(wf_id)
+        if not wf:
+            return
+        names = varmod.extract_variables(wf.steps)
+        if not names:
+            info(self._wf_dialog, "No variables",
+                 "This workflow has no variables yet.\nOpen it and click "
+                 "“+ variable” on a Type-text step to add one.")
+            return
+        dlg = RunValuesDialog(names, varmod.variable_samples(wf.steps), self._wf_dialog)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        ctx = varmod.build_context(dlg.values)
+        self._close_wf_dialog()
+        self._play_workflow(wf, variables=ctx)
+
+    def _on_batch(self, wf_id: int):
+        wf = get_workflow(wf_id)
+        if not wf:
+            return
+        names = varmod.extract_variables(wf.steps)
+        dlg = BatchDialog(names, varmod.variable_samples(wf.steps), self._wf_dialog)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        rows, mapping, policy = dlg.rows, dlg.mapping, dlg.policy
+        if not rows:
+            return
+        self._close_wf_dialog()
+        self._start_batch(wf, rows, mapping, policy)
+
+    def _start_batch(self, wf: Workflow, rows: list, mapping: dict, policy: str):
+        if self._batch_thread and self._batch_thread.is_alive():
+            return
+        if self._recorder.recording or self._player.playing:
+            return
+        self._batch_stop.clear()
+        self._overlay.show()
+        self._overlay.set_state(OverlayState.PLAYING)
+        self._batch_thread = threading.Thread(
+            target=self._run_batch, args=(wf, rows, mapping, policy), daemon=True
+        )
+        self._batch_thread.start()
+
+    def _run_batch(self, wf: Workflow, rows: list, mapping: dict, policy: str):
+        total = len(rows)
+        done = failed = 0
+        logger.info("Batch start: '%s' x %d rows (policy=%s)", wf.name, total, policy)
+        for i, row in enumerate(rows, start=1):
+            if self._batch_stop.is_set():
+                logger.info("Batch stopped at row %d", i)
+                break
+            values = {var: row.get(col, "") for var, col in mapping.items() if col}
+            ctx = varmod.build_context(values, row_index=i, total=total)
+            self._overlay.set_playback_progress(i, total, f"Row {i} of {total}")
+            self._player.play_blocking(wf, 1.0, variables=ctx)
+            if self._player.halted:
+                failed += 1
+                logger.warning("Batch row %d halted", i)
+                if policy == "stop":
+                    break
+            else:
+                done += 1
+            # Brief settle between rows (interruptible).
+            if self._batch_stop.wait(0.4):
+                break
+
+        if wf.id:
+            update_last_run(wf.id)
+        self._overlay.set_state(OverlayState.IDLE)
+        logger.info("Batch finished: %d ok, %d failed of %d", done, failed, total)
+        summary = f"Batch complete.\n\n{done} row(s) ran, {failed} failed of {total}."
+        QTimer.singleShot(0, lambda: info(self._wf_dialog, "Batch finished", summary))
 
     def _on_step_added(self, count: int):
         self._overlay.set_step_count(count)

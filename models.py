@@ -20,10 +20,17 @@ class ActionStep:
     anchor: Optional[str] = None         # JSON: nearby stable anchor + click offset
     x: Optional[int] = None
     y: Optional[int] = None
+    # Drag end point (for type == "drag"): press at (x, y), release at (x2, y2).
+    x2: Optional[int] = None
+    y2: Optional[int] = None
     x_relative: Optional[float] = None
     y_relative: Optional[float] = None
     keys: Optional[str] = None
     text: Optional[str] = None
+    # When set, a type_text step types this variable's value (from a run prompt
+    # or a CSV/Excel column) instead of the literal `text`. `text` is kept as the
+    # recorded sample / fallback.
+    variable: Optional[str] = None
     scroll_dx: int = 0
     scroll_dy: int = 0
     delay_after: float = 0.0

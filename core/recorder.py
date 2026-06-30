@@ -27,6 +27,9 @@ _OUR_PID = os.getpid()
 _MOVE_INTERVAL_S = 0.045
 _MOVE_MIN_DIST = 6
 
+# A press→release that travels more than this (px) is a drag, not a click.
+_DRAG_THRESHOLD = 12
+
 _user32 = ctypes.windll.user32
 _user32.GetForegroundWindow.restype = wintypes.HWND
 _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
@@ -117,6 +120,9 @@ class Recorder:
         self.capture_moves = False
         self._last_move_time = 0.0
         self._last_move_pos: Optional[tuple] = None
+        # Drag detection: remember the press so the release can decide click-vs-drag.
+        self._press_info: Optional[tuple] = None  # (x, y, button, step)
+        self._button_down = False
         # Double-click detection state.
         self._last_click: Optional[tuple] = None  # (time, x, y, button)
         self._last_click_step: Optional[ActionStep] = None
@@ -302,15 +308,19 @@ class Recorder:
         with self._lock:
             text = self._text_buffer
             self._text_buffer = ""
-
-        logger.debug("Typed text flushed: %r (%d chars)", text, len(text))
-        step = ActionStep(
-            type="type_text",
-            text=text,
-            description=f"Type '{text}'",
-        )
-        with self._lock:
-            self._steps.append(step)
+            # If the previous step is also typed text (a continuous typing chain),
+            # append to it so it's one action with no split / no in-between delay.
+            prev = self._steps[-1] if self._steps else None
+            if prev is not None and prev.type == "type_text" and prev.variable is None:
+                prev.text = (prev.text or "") + text
+                prev.description = f"Type '{prev.text}'"
+                merged = True
+            else:
+                self._steps.append(ActionStep(
+                    type="type_text", text=text, description=f"Type '{text}'"))
+                merged = False
+        logger.debug("Typed text %s: %r (%d chars)",
+                     "merged" if merged else "flushed", text, len(text))
         self._notify_step_added()
 
     def _notify_step_added(self) -> None:
@@ -321,23 +331,29 @@ class Recorder:
                 pass
 
     def _on_click(self, x: int, y: int, button: mouse.Button, pressed: bool) -> None:
-        # This runs on the OS input hook thread, which must return fast — the
-        # expensive element lookup is deferred to the resolver thread so we don't
-        # block (and drop) subsequent scroll/click events.
-        if not self._recording or self._paused or not pressed:
+        # Runs on the OS input hook thread — must return fast. The press records
+        # a click step; the release decides whether it was actually a drag.
+        if not self._recording or self._paused:
             return
+        if pressed:
+            self._handle_press(x, y, button)
+        else:
+            self._handle_release(x, y, button)
 
+    def _handle_press(self, x: int, y: int, button: mouse.Button) -> None:
         # Fast self-filter: ignore clicks on FlowRecord's own windows (no UIA).
         if _window_pid_at(x, y) == _OUR_PID:
             logger.debug("Ignoring click on FlowRecord UI at (%d,%d)", x, y)
             return
 
+        self._button_down = True
         now = time.monotonic()
         # Double-click: a second press of the same button, near the same spot,
         # within the OS double-click window -> promote the prior click step.
         if self._is_double_click(now, x, y, button):
             self._promote_to_double_click(x, y)
             self._last_click = None  # don't chain a 3rd press into the pair
+            self._press_info = None
             return
 
         if button == mouse.Button.right:
@@ -360,10 +376,36 @@ class Recorder:
             self._steps.append(step)
         self._last_click = (now, x, y, button)
         self._last_click_step = step
+        # Remember the press so a far-away release can turn this into a drag.
+        self._press_info = (x, y, button, step)
         self._notify_step_added()
 
         # Resolve the UI element off the hook thread and fill the step in.
         self._resolve_queue.put((step, x, y, verb))
+
+    def _handle_release(self, x: int, y: int, button: mouse.Button) -> None:
+        self._button_down = False
+        pi = self._press_info
+        self._press_info = None
+        if pi is None:
+            return
+        px, py, pbtn, step = pi
+        # Only left-button press→release that travelled far enough becomes a drag.
+        if button != pbtn or button != mouse.Button.left or step is None:
+            return
+        if abs(x - px) < _DRAG_THRESHOLD and abs(y - py) < _DRAG_THRESHOLD:
+            return  # barely moved -> it was a normal click
+
+        with self._lock:
+            if step.type in ("click", "double_click"):
+                step.type = "drag"
+                step.x2 = x
+                step.y2 = y
+                target = f" on '{step.element_name}'" if step.element_name else ""
+                step.description = f"Drag from ({px}, {py}) to ({x}, {y}){target}"
+        self._last_click = None  # a drag shouldn't chain into a double-click
+        logger.debug("DRAG (%d,%d) -> (%d,%d)", px, py, x, y)
+        self._notify_step_added()
 
     def _resolve_worker(self) -> None:
         """Drain queued clicks and fill in their UI element details (the slow,
@@ -402,8 +444,17 @@ class Recorder:
                     except Exception:
                         pass
 
-                if elem.get("element_name"):
-                    step.description = f"{verb} at ({x}, {y}) on '{elem.get('element_name')}'"
+                name = elem.get("element_name")
+                if name:
+                    # Don't clobber a drag's description if the release already
+                    # promoted it; otherwise add the element name to the verb.
+                    if step.type == "drag":
+                        step.description = (
+                            f"Drag '{name}' to ({step.x2}, {step.y2})"
+                            if step.x2 is not None else f"Drag '{name}'"
+                        )
+                    else:
+                        step.description = f"{verb} at ({x}, {y}) on '{name}'"
                 logger.debug(
                     "CLICK (%d,%d) element=%r type=%r app=%r window=%r rel=(%s,%s)",
                     x, y, elem.get("element_name"), elem.get("element_type"),
@@ -443,6 +494,8 @@ class Recorder:
         # it samples the path instead of flooding with thousands of pixels. Runs
         # on the input hook thread, so it stays cheap (no element resolution).
         if not self._recording or self._paused or not self.capture_moves:
+            return
+        if self._button_down:  # moves during a held button belong to a drag
             return
         if self._text_buffer:  # don't fragment an in-progress type burst
             return
@@ -553,6 +606,10 @@ class Recorder:
     def _key_to_char(key) -> Optional[str]:
         if isinstance(key, keyboard.KeyCode) and key.char:
             return key.char
+        # Space arrives as a special Key, not a char — fold it into typed text so
+        # "hello world" stays one type_text instead of splitting on the space.
+        if key == keyboard.Key.space:
+            return " "
         return None
 
     @staticmethod

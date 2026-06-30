@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS steps (
     element_type TEXT,
     x INTEGER,
     y INTEGER,
+    x2 INTEGER,
+    y2 INTEGER,
     x_relative REAL,
     y_relative REAL,
     keys TEXT,
@@ -51,6 +53,7 @@ CREATE TABLE IF NOT EXISTS steps (
     parent_path TEXT,
     element_rect TEXT,
     anchor TEXT,
+    variable TEXT,
     FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 )
 """
@@ -117,13 +120,17 @@ def _migrate_favorite(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_match_signals(conn: sqlite3.Connection) -> None:
-    """Add self-heal signal columns (element_rect / anchor)."""
+    """Add self-heal signal columns (element_rect / anchor) + variable binding."""
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(steps)").fetchall()]
         added = False
-        for col in ("element_rect", "anchor"):
+        for col in ("element_rect", "anchor", "variable"):
             if col not in cols:
                 conn.execute(f"ALTER TABLE steps ADD COLUMN {col} TEXT")
+                added = True
+        for col in ("x2", "y2"):  # drag end point
+            if col not in cols:
+                conn.execute(f"ALTER TABLE steps ADD COLUMN {col} INTEGER")
                 added = True
         if added:
             conn.commit()
@@ -199,11 +206,11 @@ def _insert_step(conn: sqlite3.Connection, workflow_id: int, order: int, step: A
     conn.execute(
         "INSERT INTO steps (workflow_id, step_order, type, app_name, window_title, "
         "element_name, element_type, automation_id, class_name, parent_path, "
-        "x, y, x_relative, y_relative, keys, text, "
+        "x, y, x2, y2, x_relative, y_relative, keys, text, "
         "scroll_dx, scroll_dy, delay_after, description, enabled, "
         "smart_wait_enabled, smart_wait_timeout, smart_wait_on_timeout, "
-        "element_rect, anchor) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "element_rect, anchor, variable) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             workflow_id,
             order,
@@ -217,6 +224,8 @@ def _insert_step(conn: sqlite3.Connection, workflow_id: int, order: int, step: A
             step.parent_path,
             step.x,
             step.y,
+            step.x2,
+            step.y2,
             step.x_relative,
             step.y_relative,
             step.keys,
@@ -231,6 +240,7 @@ def _insert_step(conn: sqlite3.Connection, workflow_id: int, order: int, step: A
             step.smart_wait_on_timeout,
             step.element_rect,
             step.anchor,
+            step.variable,
         ),
     )
 
@@ -381,6 +391,9 @@ def _row_to_step(row: sqlite3.Row) -> ActionStep:
     parent_path = row["parent_path"] if "parent_path" in keys else None
     element_rect = row["element_rect"] if "element_rect" in keys else None
     anchor = row["anchor"] if "anchor" in keys else None
+    variable = row["variable"] if "variable" in keys else None
+    x2 = row["x2"] if "x2" in keys else None
+    y2 = row["y2"] if "y2" in keys else None
     return ActionStep(
         id=row["id"],
         type=row["type"],
@@ -393,8 +406,11 @@ def _row_to_step(row: sqlite3.Row) -> ActionStep:
         parent_path=parent_path,
         element_rect=element_rect,
         anchor=anchor,
+        variable=variable,
         x=row["x"],
         y=row["y"],
+        x2=x2,
+        y2=y2,
         x_relative=row["x_relative"],
         y_relative=row["y_relative"],
         keys=row["keys"],

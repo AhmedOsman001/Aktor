@@ -10,7 +10,8 @@ import pyautogui
 from pywinauto import Desktop
 
 from flowrecord.config import MIN_ACTION_INTERVAL_MS, SYSTEM_PROCESSES
-from flowrecord.core.element_detector import find_element
+from flowrecord.core.element_detector import find_element, focus_window
+from flowrecord.core.variables import resolve as resolve_vars
 from flowrecord.models import ActionStep, Workflow
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,10 @@ class Player:
         self._total_steps = 0
         self._on_step_complete = on_step_complete
         self._thread: Optional[threading.Thread] = None
+        # Variable values for {{...}} substitution in this run (set by play()).
+        self._context: dict = {}
+        # True if the last run stopped early on a PlaybackError (used by batch).
+        self.halted = False
 
         # Smart Wait callbacks — set by the host (see main.py). Invoked from the
         # playback thread, same pattern as on_step_complete.
@@ -65,7 +70,8 @@ class Player:
     def total_steps(self) -> int:
         return self._total_steps
 
-    def play(self, workflow: Workflow, speed: float = 1.0) -> None:
+    def play(self, workflow: Workflow, speed: float = 1.0,
+             variables: Optional[dict] = None) -> None:
         if self._playing:
             logger.warning("Player already playing")
             return
@@ -76,13 +82,15 @@ class Player:
         self._pause_event.set()
         self._total_steps = len(workflow.steps)
         self._current_index = 0
+        self._context = variables or {}
 
         self._thread = threading.Thread(
             target=self._run, args=(workflow.steps, speed), daemon=True
         )
         self._thread.start()
 
-    def play_blocking(self, workflow: Workflow, speed: float = 1.0) -> None:
+    def play_blocking(self, workflow: Workflow, speed: float = 1.0,
+                      variables: Optional[dict] = None) -> None:
         if self._playing:
             return
         self._playing = True
@@ -91,6 +99,7 @@ class Player:
         self._pause_event.set()
         self._total_steps = len(workflow.steps)
         self._current_index = 0
+        self._context = variables or {}
         try:
             self._run(workflow.steps, speed)
         finally:
@@ -117,6 +126,7 @@ class Player:
 
     def _run(self, steps: list[ActionStep], speed: float) -> None:
         logger.info("Playback starting — %d steps, speed=%.1fx", len(steps), speed)
+        self.halted = False
         for i, step in enumerate(steps):
             if self._stop_flag.is_set():
                 logger.info("Playback stopped at step %d", i)
@@ -144,6 +154,7 @@ class Player:
                 self._execute_step(step, speed)
             except PlaybackError as e:
                 logger.error("Playback halted at step %d: %s", i + 1, e)
+                self.halted = True
                 break
             except Exception:
                 logger.exception("Error executing step %d (%s): %s", i, step.type, step.description)
@@ -179,6 +190,7 @@ class Player:
             "type_text": self._do_type_text,
             "scroll": self._do_scroll,
             "move": self._do_move,
+            "drag": self._do_drag,
             "launch_app": self._do_launch_app,
             "delay": lambda s: None,
         }.get(step.type)
@@ -279,7 +291,22 @@ class Player:
         logger.debug("Middle-click at (%d, %d)", click_x, click_y)
         pyautogui.middleClick(click_x, click_y)
 
+    def _focus_target(self, step: ActionStep) -> None:
+        """Bring the step's target window to the foreground first, so the click/
+        drag lands on the intended app — never on a window that happens to be on
+        top at those coordinates."""
+        if not (step.app_name or step.window_title):
+            return
+        try:
+            if focus_window(step.app_name, step.window_title):
+                # Give the window a moment to actually come forward before acting.
+                time.sleep(0.15)
+        except Exception:
+            logger.debug("focus_target failed for app=%s", step.app_name, exc_info=True)
+
     def _resolve_click_coords(self, step: ActionStep) -> tuple[int, int]:
+        # Always foreground the intended window before locating/clicking.
+        self._focus_target(step)
         if step.element_name:
             logger.debug(
                 "Searching element name=%r type=%r app=%r window=%r near (%s,%s)",
@@ -442,11 +469,21 @@ class Player:
             pyautogui.press(parts[0])
 
     def _do_type_text(self, step: ActionStep) -> None:
-        if not step.text:
-            logger.debug("type_text step has empty text, skipping")
+        # An explicitly bound variable types its value from this run's context
+        # (prompt / CSV row). If the variable wasn't supplied, fall back to the
+        # recorded sample text. Unbound steps may still use inline {{tokens}}.
+        if step.variable:
+            if step.variable in self._context:
+                text = str(self._context[step.variable])
+            else:
+                text = step.text or ""
+        else:
+            text = resolve_vars(step.text or "", self._context)
+        if not text:
+            logger.debug("type_text resolved to empty, skipping")
             return
-        logger.debug("typing %d chars: %r", len(step.text), step.text[:60])
-        pyautogui.write(step.text, interval=0.02)
+        logger.debug("typing %d chars: %r", len(text), text[:60])
+        pyautogui.write(text, interval=0.02)
 
     def _do_move(self, step: ActionStep) -> None:
         if step.x is None or step.y is None:
@@ -455,6 +492,19 @@ class Player:
             pyautogui.moveTo(step.x, step.y)
         except Exception:
             logger.debug("move to (%s, %s) failed", step.x, step.y)
+
+    def _do_drag(self, step: ActionStep) -> None:
+        # Press-hold at the (element-resolved) start, move to the end, release —
+        # a real drag for drag-and-drop, drag-select, slider drags, etc.
+        sx, sy = self._resolve_click_coords(step)
+        if step.x2 is None or step.y2 is None:
+            logger.warning("drag step has no end point; doing a plain click")
+            pyautogui.click(sx, sy)
+            return
+        ex, ey = step.x2, step.y2
+        logger.debug("Drag (%d, %d) -> (%d, %d)", sx, sy, ex, ey)
+        pyautogui.moveTo(sx, sy)
+        pyautogui.dragTo(ex, ey, duration=0.4, button="left")
 
     def _do_scroll(self, step: ActionStep) -> None:
         # Scale notches -> raw wheel units.

@@ -59,6 +59,9 @@ _user32.SendMessageTimeoutW.argtypes = [
     wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_ulong),
 ]
 _user32.SendMessageTimeoutW.restype = ctypes.c_long
+_user32.GetForegroundWindow.restype = wintypes.HWND
+_user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 
 _EnumChildProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -732,62 +735,138 @@ def find_element(
         return None
     try:
         desktop = _get_desktop()
-        windows = []
-        try:
-            windows = desktop.windows()
-        except Exception:
-            pass
 
-        # Wake a11y for the target process before descending — otherwise the
-        # descendant walk over a Chromium window yields nothing useful.
-        if app_name:
-            for pid in _pids_for_app(app_name):
-                _wake_chromium_a11y(pid, x or 0, y or 0)
-
-        scoped = _scope_windows(windows, app_name, window_title)
-        candidates = _collect_candidates(
-            scoped, element_name, element_type, x, y, automation_id, class_name
-        )
-
-        if not candidates and app_name and window_title:
-            logger.debug("find_element: no app-scoped candidates — retry by window_title")
-            title_scoped = [w for w in windows if _title_contains(w, window_title) and _is_visible_window(w)]
-            candidates = _collect_candidates(
-                title_scoped, element_name, element_type, x, y, automation_id, class_name
+        def _is_strong(c) -> bool:
+            return (
+                c.get("autoid_score", 0.0) >= 0.95
+                or c.get("class_score", 0.0) >= 0.95
+                or c.get("name_score", 0.0) >= _WEAK_NAME_THRESHOLD
             )
 
-        if not candidates:
+        def _scan():
+            try:
+                windows = desktop.windows()
+            except Exception:
+                windows = []
+            scoped = _scope_windows(windows, app_name, window_title)
+            cands = _collect_candidates(
+                scoped, element_name, element_type, x, y, automation_id, class_name
+            )
+            if not cands and app_name and window_title:
+                title_scoped = [w for w in windows
+                                if _title_contains(w, window_title) and _is_visible_window(w)]
+                cands = _collect_candidates(
+                    title_scoped, element_name, element_type, x, y, automation_id, class_name
+                )
+            return cands
+
+        # Element matching is what makes replay resolution/position-independent —
+        # it clicks the control wherever it now lives. Chromium/Electron build
+        # their UIA tree lazily, so wake the target app and retry briefly while
+        # the best match is still weak (mirrors get_element_at on the record side).
+        pids = _pids_for_app(app_name) if app_name else []
+        for pid in pids:
+            _wake_chromium_a11y(pid, x or 0, y or 0)
+
+        best = None
+        deadline = time.monotonic() + (1.6 if pids else 0.0)
+        while True:
+            candidates = _scan()
+            if candidates:
+                cand = max(candidates, key=lambda c: c["score"])
+                if best is None or cand["score"] > best["score"]:
+                    best = cand
+                if _is_strong(cand):
+                    best = cand
+                    break
+            if not pids or time.monotonic() >= deadline:
+                break
+            for pid in pids:
+                _wake_last_attempt.pop(pid, None)  # bypass the wake debounce on retry
+                _wake_chromium_a11y(pid, x or 0, y or 0)
+            time.sleep(0.25)
+
+        if best is None:
             logger.debug(
                 "find_element: no candidates el=%r type=%r autoid=%r class=%r app=%r win=%r",
                 element_name, element_type, automation_id, class_name, app_name, window_title,
             )
             return None
 
-        best = max(candidates, key=lambda c: c["score"])
-        strong = (
-            best.get("autoid_score", 0.0) >= 0.95
-            or best.get("class_score", 0.0) >= 0.95
-            or best.get("name_score", 0.0) >= _WEAK_NAME_THRESHOLD
-        )
-        if not strong:
+        if not _is_strong(best):
+            # Only a weak/ambiguous match after retrying — returning it would
+            # click the wrong element, so fall back to the recorded coordinates
+            # (relative/anchor/raw) in the player.
             logger.warning(
-                "find_element: weak match el=%r -> %r (name=%.2f autoid=%.2f class=%.2f total=%.3f) near (%s,%s)",
+                "find_element: weak match el=%r -> %r (name=%.2f autoid=%.2f class=%.2f total=%.3f) "
+                "near (%s,%s) — falling back to coordinates",
                 element_name, best["name"], best["name_score"],
                 best.get("autoid_score", 0.0), best.get("class_score", 0.0),
                 best["score"], x, y,
             )
-        else:
-            logger.debug(
-                "find_element: matched el=%r -> %r (name=%.2f type=%.2f autoid=%.2f class=%.2f prox=%.2f total=%.3f) of %d",
-                element_name, best["name"], best["name_score"], best["type_score"],
-                best.get("autoid_score", 0.0), best.get("class_score", 0.0),
-                best["prox_score"], best["score"], len(candidates),
-            )
+            return None
+
+        logger.debug(
+            "find_element: matched el=%r -> %r (name=%.2f type=%.2f autoid=%.2f class=%.2f prox=%.2f total=%.3f)",
+            element_name, best["name"], best["name_score"], best["type_score"],
+            best.get("autoid_score", 0.0), best.get("class_score", 0.0),
+            best["prox_score"], best["score"],
+        )
         return _element_result(best["element"], best["window"])
 
     except Exception:
         logger.exception("find_element failed")
         return None
+
+
+def _window_belongs(hwnd, app_name: Optional[str]) -> bool:
+    """True if the given top-level window belongs to ``app_name``'s process."""
+    if not hwnd or not app_name:
+        return False
+    try:
+        pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return False
+        return _exe_matches(psutil.Process(pid.value).name(), app_name)
+    except Exception:
+        return False
+
+
+def focus_window(app_name: Optional[str], window_title: Optional[str]) -> bool:
+    """Bring the target app's window to the foreground before we act on it, so a
+    click/drag can never land on whatever window happens to be on top.
+
+    Identifies the window by the same captured info we match elements with
+    (process name + window title). Returns True only if it actually switched
+    focus (so the caller can wait for the window to come forward); returns False
+    if the right window is already foreground or none was found.
+    """
+    if not (app_name or window_title):
+        return False
+    try:
+        fg = _user32.GetForegroundWindow()
+    except Exception:
+        fg = None
+    if fg and app_name and _window_belongs(fg, app_name):
+        return False  # already on the intended app — nothing to do
+
+    try:
+        windows = _get_desktop().windows()
+    except Exception:
+        return False
+    scoped = _scope_windows(windows, app_name, window_title)
+    for w in scoped:
+        try:
+            if not _is_visible_window(w):
+                continue
+            w.set_focus()  # pywinauto restores + foregrounds (handles the focus dance)
+            logger.debug("focus_window: focused %r (app=%s)", _resolve_name(w), app_name)
+            return True
+        except Exception:
+            continue
+    logger.debug("focus_window: no window for app=%s title=%r", app_name, window_title)
+    return False
 
 
 def _pids_for_app(app_name: str) -> list:
